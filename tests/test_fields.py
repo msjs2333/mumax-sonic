@@ -23,7 +23,8 @@ def test_field_owns_input_and_preserves_raw_magnitude():
 
 
 def test_replay_roundtrip_has_identity_and_holds_physical_frames(tmp_path):
-    frames = [frame('wall_inplane', t) for t in (1e-9, 2e-9)]
+    from dataclasses import replace
+    frames = [replace(frame('wall_inplane', t), sequence=i) for i, t in enumerate((1e-9, 2e-9))]
     path = tmp_path/'field.npz'
     save_replay(path, frames)
     replay = load_replay(path)

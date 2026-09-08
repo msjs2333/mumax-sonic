@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import math
 from pathlib import Path
 import threading
@@ -12,11 +11,24 @@ from ..attention import Attention
 from ..mapping import map_sample
 from ..model import SonicScene
 from ..session import Transport
+from ..reporting import report_json
 from ..sources.synthetic import SCENARIOS, make_sample
 
 FIELD_SCENARIOS = {'field:skyrmion': '拓扑 · 解析单纹理', 'field:opposite_pair': '拓扑 · 正负净零双纹理',
                    'field:uniform': '拓扑 · 均匀场', 'field:wall_inplane': '取向 · 面内域轴',
-                   'field:wall_pma': '取向 · 面外域轴'}
+                   'field:wall_pma': '取向 · 面外域轴',
+                   'field:activity_rotation': '活动 · 均匀旋转', 'field:activity_localized': '活动 · 局域旋转'}
+
+ACTIVITY_REASONS = {
+    'no previous physical frame': '等待前一物理帧，不能把首帧当作零活动',
+    'adjacent dynamic frames compared': '由相邻物理帧计算；暂停保留该测量值',
+    'physical input sequence has a gap': '源数据缺帧，不跨缺口计算活动',
+    'physical time interval exceeds max_dt_s': '物理采样间隔超过设置上限',
+    'activity requires dynamic field frames': '静态或松弛数据不计算物理活动速率',
+    'not every material site has a valid vector pair': '存在无效矢量对，覆盖不足，声音静音',
+    'field segment changed': '仿真阶段变化，等待同阶段相邻帧',
+    'material mask changed': '材料区域变化，等待新的相邻帧',
+}
 
 BG = "#101823"
 PANEL = "#182434"
@@ -62,6 +74,13 @@ class SonicApp:
         self.replay = None
         self._field_cache = None
         self._field_key = None
+        self.max_dt_s = None
+        self.activity_reference = 1e9  # fixed rad/s reference, not frame normalization
+        self.replay_recipe = tk.StringVar(value='拓扑')
+        self.speed = tk.StringVar(value='1')
+        self.seek_ns = tk.StringVar(value='0')
+        self.max_dt_ns = tk.StringVar(value='')
+        self.data_note = tk.StringVar(value='')
         self.scenario = tk.StringVar(value=next(iter(SCENARIOS.values())))
         self.mode = tk.StringVar(value="both")
         self.radius = tk.DoubleVar(value=0.55)
@@ -85,8 +104,8 @@ class SonicApp:
         # Keep the full control panel visible even with Windows desktop scaling.
         w.tk.call("tk", "scaling", 96 / 72)
         w.title("MuMax-Sonic · 场观察与空间听觉")
-        w.geometry("1120x940")
-        w.minsize(1050, 900)
+        w.geometry("1120x1000")
+        w.minsize(1050, 980)
         w.configure(bg=BG)
         style = ttk.Style(w)
         style.theme_use("clam")
@@ -118,6 +137,25 @@ class SonicApp:
         ttk.Button(toolbar, text="重置", command=self.reset).pack(side="left")
         ttk.Checkbutton(toolbar, text="暂停时探听静态", variable=self.static).pack(side="left", padx=14)
         ttk.Label(toolbar, textvariable=self.time_label, style="Muted.TLabel").pack(side="right")
+        timeline = ttk.Frame(shell)
+        timeline.pack(fill='x', pady=(0, 4))
+        ttk.Label(timeline, text='回放配方').pack(side='left')
+        recipe_box = ttk.Combobox(timeline, textvariable=self.replay_recipe, values=['拓扑', '活动'], state='readonly', width=6)
+        recipe_box.pack(side='left', padx=5)
+        recipe_box.bind('<<ComboboxSelected>>', lambda e: self.invalidate_field())
+        ttk.Label(timeline, text='倍速').pack(side='left')
+        speed_box = ttk.Combobox(timeline, textvariable=self.speed, values=['0.25', '0.5', '1', '2', '4'], state='readonly', width=5)
+        speed_box.pack(side='left', padx=5)
+        speed_box.bind('<<ComboboxSelected>>', self.change_speed)
+        ttk.Label(timeline, text='跳转/ns').pack(side='left')
+        ttk.Entry(timeline, textvariable=self.seek_ns, width=9).pack(side='left', padx=5)
+        ttk.Button(timeline, text='跳转', command=self.seek_to_entry).pack(side='left')
+        ttk.Button(timeline, text='上一帧', command=lambda: self.step_frame(-1)).pack(side='left', padx=4)
+        ttk.Button(timeline, text='下一帧', command=lambda: self.step_frame(1)).pack(side='left')
+        ttk.Label(timeline, text='最大间隔/ns').pack(side='left', padx=(8, 3))
+        ttk.Entry(timeline, textvariable=self.max_dt_ns, width=7).pack(side='left')
+        ttk.Button(timeline, text='应用', command=self.apply_max_dt).pack(side='left', padx=4)
+        ttk.Label(shell, textvariable=self.data_note, style='Muted.TLabel', wraplength=1040).pack(anchor='w', pady=(0, 5))
         middle = ttk.Frame(shell)
         middle.pack(fill="both", expand=True)
         self.canvas = tk.Canvas(middle, bg=PANEL, highlightthickness=0, width=690, height=370)
@@ -132,8 +170,11 @@ class SonicApp:
             ttk.Scale(controls, from_=lo, to=hi, variable=var, length=245).pack(fill="x", pady=(0, 9))
         ttk.Button(controls, text="关注区域回中", command=lambda: setattr(self, "center", (0.0, 0.0))).pack(fill="x", pady=4)
         ttk.Label(controls, text="正负声部 · 共用强度标尺").pack(anchor="w", pady=(16, 6))
+        self.sign_buttons = []
         for value, label in (("both", "同时听正负"), ("positive", "仅正声部 +"), ("negative", "仅负声部 −")):
-            ttk.Radiobutton(controls, text=label, value=value, variable=self.mode).pack(anchor="w", pady=3)
+            button = ttk.Radiobutton(controls, text=label, value=value, variable=self.mode)
+            button.pack(anchor="w", pady=3)
+            self.sign_buttons.append(button)
         ttk.Label(controls, textvariable=self.legend, style="Muted.TLabel").pack(anchor="w", pady=12)
         ttk.Label(shell, textvariable=self.summary, style="Muted.TLabel").pack(anchor="w", pady=(9, 5))
         columns = ("id", "sign", "xy", "strength", "gain", "angle", "selection")
@@ -202,11 +243,59 @@ class SonicApp:
 
     def toggle_play(self):
         self.transport.playing = not self.transport.playing
+        self._last_tick = time.monotonic()
         self.play_button.configure(text="暂停" if self.transport.playing else "播放")
 
     def reset(self):
-        self.transport.sim_time_s = self.replay.frames[0].sim_time_s if self.replay and self._labels[self.scenario.get()] == 'replay' else 0.0
+        self.transport.seek(self.replay.frames[0].sim_time_s if self.replay and self._labels[self.scenario.get()] == 'replay' else 0.0)
+        self._last_tick = time.monotonic()
+        self.invalidate_field()
         self.sequence = 0
+
+    def invalidate_field(self):
+        self._field_key = None
+
+    def change_speed(self, event=None):
+        self.transport.set_speed(float(self.speed.get()))
+        self._last_tick = time.monotonic()
+
+    def seek_to(self, value):
+        if not math.isfinite(value) or value < 0:
+            raise ValueError('跳转时间必须有限且非负')
+        if self.replay and self._labels[self.scenario.get()] == 'replay':
+            value = max(self.replay.frames[0].sim_time_s, min(self.replay.frames[-1].sim_time_s, value))
+        self.transport.seek(value)
+        self.transport.playing = False
+        self.play_button.configure(text='播放')
+        self._last_tick = time.monotonic()
+        self.invalidate_field()
+
+    def seek_to_entry(self):
+        try:
+            self.seek_to(float(self.seek_ns.get())*1e-9)
+        except ValueError as exc:
+            self.status.set(f'跳转失败：{exc}')
+
+    def step_frame(self, delta):
+        scenario = self._labels[self.scenario.get()]
+        if scenario == 'replay' and self.replay:
+            index = self.replay.index_at(self.transport.sim_time_s)
+            index = max(0, min(len(self.replay.frames)-1, index+delta))
+            self.seek_to(self.replay.frames[index].sim_time_s)
+        else:
+            from ..sources.activity_demo import STEP_S
+            index = int(round(self.transport.sim_time_s/STEP_S))
+            self.seek_to(max(0, index+delta)*STEP_S)
+
+    def apply_max_dt(self):
+        try:
+            value = float(self.max_dt_ns.get())*1e-9 if self.max_dt_ns.get().strip() else None
+            if value is not None and (not math.isfinite(value) or value <= 0):
+                raise ValueError('间隔必须有限且大于零；留空表示不设阈值')
+            self.max_dt_s = value
+            self.invalidate_field()
+        except ValueError as exc:
+            self.status.set(f'间隔设置失败：{exc}')
 
     def load_field(self):
         path = filedialog.askopenfilename(filetypes=[('Vector replay', '*.npz')])
@@ -215,9 +304,9 @@ class SonicApp:
         try:
             from ..sources.replay import load_replay
             self.replay = load_replay(path)
-            self._labels['回放 · 二维拓扑'] = 'replay'
+            self._labels['回放 · 三分量场'] = 'replay'
             self.scenario_combo.configure(values=list(self._labels))
-            self.scenario.set('回放 · 二维拓扑')
+            self.scenario.set('回放 · 三分量场')
             self._field_key = None
             self.reset()
         except Exception as exc:
@@ -227,19 +316,27 @@ class SonicApp:
         from ..fields import FieldFrame
         from ..field_pipeline import observe_field
         from ..sources.analytic import make_field
+        previous = None
         if scenario == 'replay':
-            frame = self.replay.at(self.transport.sim_time_s)
-            key = (scenario, self.replay.sha256, frame.sequence)
-            recipe, axes = 'topology', {}
+            previous, frame = self.replay.pair_at(self.transport.sim_time_s)
+            recipe, axes = ('activity' if self.replay_recipe.get() == '活动' else 'topology'), {}
+            key = (scenario, self.replay.sha256, frame.sequence, recipe, self.max_dt_s)
             if self.transport.sim_time_s >= self.replay.frames[-1].sim_time_s:
                 self.transport.sim_time_s = self.replay.frames[-1].sim_time_s
                 self.transport.playing = False
                 self.play_button.configure(text='播放')
         else:
             name = scenario.split(':', 1)[1]
-            tick = int(self.transport.sim_time_s / 5e-11) if name.startswith('wall') else 0
-            key = (scenario, tick)
+            tick = int(self.transport.sim_time_s / 5e-11 + 1e-9) if name.startswith(('wall', 'activity_')) else 0
+            key = (scenario, tick, self.max_dt_s)
             if key == self._field_key:
+                return self._field_cache
+            if name.startswith('activity_'):
+                from ..sources.activity_demo import make_activity_frame
+                frame = make_activity_frame(name, tick)
+                previous = make_activity_frame(name, tick-1) if tick else None
+                self._field_cache = observe_field(frame, 'activity', previous=previous, max_dt_s=self.max_dt_s)
+                self._field_key = key
                 return self._field_cache
             t = tick*5e-11
             vectors = make_field(name, t)
@@ -250,7 +347,7 @@ class SonicApp:
             recipe = 'direction' if name.startswith('wall') else 'topology'
             axes = dict(domain_axis=(0, 0, 1), reference_axis=(1, 0, 0)) if name == 'wall_pma' else {}
         if key != self._field_key:
-            self._field_cache = observe_field(frame, recipe, **axes)
+            self._field_cache = observe_field(frame, recipe, previous=previous, max_dt_s=self.max_dt_s, **axes)
             self._field_key = key
         return self._field_cache
 
@@ -298,10 +395,11 @@ class SonicApp:
         c.create_line(cx-5, cy, cx+5, cy, fill="#e7bd75")
         c.create_line(cx, cy-5, cx, cy+5, fill="#e7bd75")
         gains = {s.source_id: s.gain for s in self.scene.sources}
+        activity = self.field_view is not None and self.field_view.diagnostic['recipe'] == 'activity'
         for i, o in enumerate(self.sample.observations):
             px, py = xy((o.position_m[0]-attention.origin_m[0])/attention.extent_m, (o.position_m[1]-attention.origin_m[1])/attention.extent_m)
             color = POS if o.sign > 0 else NEG
-            radius = 8 + 14*math.sqrt(min(o.strength, 1))
+            radius = 8 + 14*math.sqrt(min(o.strength/(self.activity_reference if activity else 1), 1))
             # Concentric sign outlines preserve true position for colocated sources.
             if o.sign < 0:
                 radius += 4
@@ -311,7 +409,7 @@ class SonicApp:
                 c.create_oval(px-3, py-3, px+3, py+3, fill=TEXT, outline='', tags=(f'selected:{o.source_id}',))
             if self.field_view is None or gains.get(o.source_id, 0) > 0:
                 c.create_text(px, py + (radius+13)*(1 if o.sign > 0 else -1),
-                              text=('φ ' if o.orientation_enabled else ("+ " if o.sign > 0 else "− "))+o.source_id, fill=color)
+                              text=('a ' if activity else ('φ ' if o.orientation_enabled else ("+ " if o.sign > 0 else "− ")))+o.source_id, fill=color)
             a = o.orientation_rad
             if o.orientation_enabled or self.field_view is None:
                 c.create_line(px, py, px+radius*math.cos(a), py-radius*math.sin(a), fill=color, arrow="last")
@@ -350,7 +448,11 @@ class SonicApp:
         field = self.field_view.field if self.field_view else None
         attention = Attention(self.center, self.radius.get(), self.background.get(),
                               field.extent_m if field else 1e-6, field.center_m[:2] if field else (0, 0))
-        self.scene = map_sample(self.sample, attention, mode=self.mode.get(), master_gain=self.master.get(), audible=self.transport.audible)
+        is_activity = self.field_view is not None and self.field_view.diagnostic['recipe'] == 'activity'
+        for button in self.sign_buttons:
+            button.state(['disabled'] if is_activity else ['!disabled'])
+        self.scene = map_sample(self.sample, attention, mode='both' if is_activity else self.mode.get(), master_gain=self.master.get(), audible=self.transport.audible,
+                                strength_reference=self.activity_reference if is_activity else 1.0)
         if self.audio_ready and not self.opening:
             try:
                 self.engine.update(self.scene)
@@ -360,16 +462,26 @@ class SonicApp:
             except Exception as exc:
                 self.audio_ready = False
                 self.status.set(f"音频故障：{exc} · 请重连")
-        self.time_label.set(f"t = {self.transport.sim_time_s*1e9:.2f} ns · 演示时标 1 ns/s")
+        self.time_label.set(f"t = {self.transport.sim_time_s*1e9:.2f} ns · {self.transport.playback_rate:g}×")
+        self.data_note.set('倍速只改变浏览速度；最大间隔只用于活动配方，留空不推断采样间隔。')
         positive = sum(o.strength for o in self.sample.observations if o.sign > 0)
         negative = sum(o.strength for o in self.sample.observations if o.sign < 0)
         orientation_note = " · 角标签仅可视化，尚未映射声音" if scenario == "orientation" else ""
         self.summary.set(f"标签强度 Σ+ {positive:.2f}   Σ− {negative:.2f}   净值 {positive-negative:.2f}   绝对和 {positive+negative:.2f}  · 非物理 Q   |   {self.sample.validity} · 覆盖 {self.sample.coverage:.0%}{orientation_note}")
         if self.field_view:
             self.summary.set(self.field_view.summary + f' | {self.sample.validity} · 覆盖 {self.sample.coverage:.0%}')
-            self.subtitle.set(f'P2a · {self.sample.source_kind} 三分量场 · {self.sample.observations[0].quantity if self.sample.observations else "有效域观测"} · 箭头 XY / 蓝橙为 ±z')
-            self.time_label.set(f'帧 t = {self.sample.sim_time_s*1e9:.2f} ns · 播放时标 1 ns/s')
-            if self.field_view.diagnostic['recipe'] == 'direction':
+            self.subtitle.set(f'场观察 · {self.sample.source_kind} · {self.sample.observations[0].quantity if self.sample.observations else "有效域观测"} · 箭头 XY / 蓝橙为 ±z')
+            self.time_label.set(f'帧 t = {self.sample.sim_time_s*1e9:.2f} ns · {self.transport.playback_rate:g}×')
+            if is_activity:
+                diagnostic = self.field_view.diagnostic
+                dt = diagnostic['dt_s']
+                reason = ACTIVITY_REASONS.get(diagnostic['reason'], diagnostic['reason'])
+                note = f'物理 Δt：{dt*1e12:.4g} ps · {reason}' if dt is not None else f'活动状态：{reason}'
+                if 'sequence_inferred:v1' in self.field_view.field.provenance:
+                    note += ' · 旧文件未保存帧号，无法按序号检测缺帧'
+                self.data_note.set(note)
+                self.legend.set(f'活动强度：rad/s · 无正负号\n固定声音参考 {self.activity_reference:.3g} rad/s\n暂停时探听保留测量值')
+            elif self.field_view.diagnostic['recipe'] == 'direction':
                 self.legend.set('φ：音高 + 起伏速率编码\n强度为横向投影面积权重\n非拓扑符号 · 使用正声部输出')
             else:
                 self.legend.set('绿色 Q+ / 紫色 Q−\n圆为分块贡献，非粒子检测\n主声场最多 4 路 · 固定尺度')
@@ -378,10 +490,11 @@ class SonicApp:
             self.legend.set('绿色 + / 紫色 −\n位置表示方位，音色表示符号\n主声场最多 4 路 · 虚拟距离固定')
         self._draw(attention)
         self.table.delete(*self.table.get_children())
+        self.table.heading('strength', text='贡献 / rad/s' if is_activity else '原始强度')
         gains = {s.source_id: s.gain for s in self.scene.sources}
         for o in self.sample.observations:
-            self.table.insert("", "end", values=(o.source_id, "+" if o.sign > 0 else "−",
-                f"{o.position_m[0]*1e6:.2f}, {o.position_m[1]*1e6:.2f}", f"{o.strength:.3f}",
+            self.table.insert("", "end", values=(o.source_id, '—' if is_activity else ("+" if o.sign > 0 else "−"),
+                f"{o.position_m[0]*1e6:.2f}, {o.position_m[1]*1e6:.2f}", f"{o.strength:.3g}",
                 f"{gains.get(o.source_id, 0):.4f}", f"{math.degrees(o.orientation_rad):.1f}",
                 ('圈内' if attention.contains(o) else '圈外') + (' / 已选入' if gains.get(o.source_id, 0) > 0 else ' / 未选入')))
         self._tick_id = self.window.after(33, self._tick)
@@ -397,7 +510,9 @@ class SonicApp:
                 payload.update(source_kind=self.sample.source_kind,
                                physical_topology_computed=self.field_view.diagnostic['recipe'] == 'topology',
                                field=self.field_view.diagnostic)
-            Path(filename).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            payload.update(playback_rate=self.transport.playback_rate, activity_reference_rad_s=self.activity_reference,
+                           activity_max_dt_s=self.max_dt_s)
+            Path(filename).write_text(report_json(payload), encoding="utf-8")
 
     def close(self):
         self.closing = True
@@ -408,19 +523,23 @@ class SonicApp:
         self.window.destroy()
 
 
-def run(no_audio=False, dll_path=None, field_demo=None, replay_path=None):
+def run(no_audio=False, dll_path=None, field_demo=None, replay_path=None, recipe='topology', max_dt_s=None, activity_reference=1e9):
     configure_dpi()
     root = tk.Tk()
     app = SonicApp(root, no_audio=no_audio, dll_path=dll_path)
+    app.replay_recipe.set('活动' if recipe == 'activity' else '拓扑')
+    app.max_dt_s = max_dt_s
+    app.max_dt_ns.set('' if max_dt_s is None else f'{max_dt_s*1e9:g}')
+    app.activity_reference = activity_reference
     if field_demo:
         app.scenario.set(FIELD_SCENARIOS[f'field:{field_demo}'])
         app.reset()
     if replay_path:
         from ..sources.replay import load_replay
         app.replay = load_replay(replay_path)
-        app._labels['回放 · 二维拓扑'] = 'replay'
+        app._labels['回放 · 三分量场'] = 'replay'
         app.scenario_combo.configure(values=list(app._labels))
-        app.scenario.set('回放 · 二维拓扑')
+        app.scenario.set('回放 · 三分量场')
         app.reset()
     root.mainloop()
 

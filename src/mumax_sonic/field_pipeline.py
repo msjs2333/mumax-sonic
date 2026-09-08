@@ -22,8 +22,9 @@ def _tiles(shape, divisions=4):
 
 
 def observe_field(frame, recipe='topology', *, method='solid_angle', boundary='open',
-                  domain_axis=(1, 0, 0), reference_axis=(0, 1, 0)):
+                  domain_axis=(1, 0, 0), reference_axis=(0, 1, 0), previous=None, max_dt_s=None):
     observations = []
+    validity_override = None
     if recipe == 'topology':
         result = topology(frame.vectors, frame.dx_m, frame.dy_m, mask=frame.mask,
                           method=method, boundary=boundary)
@@ -67,9 +68,35 @@ def observe_field(frame, recipe='topology', *, method='solid_angle', boundary='o
         summary = f'连续取向 · 有效投影 {np.count_nonzero(result.valid)}/{np.count_nonzero(frame.mask)} · 固定声明基底'
         diagnostic = dict(recipe=recipe, domain_axis=list(result.d), e1=list(result.e1), e2=list(result.e2),
                           coverage=coverage, angle_unit='rad', automatic_wall_detection=False)
+    elif recipe == 'activity':
+        from .observers.activity import angular_activity
+        result = angular_activity(previous, frame, max_dt_s=max_dt_s)
+        coverage = result.coverage
+        validity_override = result.validity
+        ny, nx = frame.vectors.shape[:2]
+        x, y = np.meshgrid(np.arange(nx)*frame.dx_m+frame.origin_m[0],
+                           np.arange(ny)*frame.dy_m+frame.origin_m[1])
+        material_count = int(np.count_nonzero(frame.mask))
+        for tile, index in _tiles(result.valid.shape):
+            weights = np.where(result.valid[index], result.rate_rad_s[index], 0.0)
+            total = float(np.sum(weights))
+            if total <= 0 or not np.isfinite(total):
+                continue
+            position = (float(np.sum(x[index]*weights)/total), float(np.sum(y[index]*weights)/total), frame.origin_m[2])
+            observations.append(Observation(f'activity:{tile}', position, total/material_count, 1,
+                entity_id=frame.entity_id, quantity='angular_activity_mean_contribution', unit='rad/s'))
+        summary = f'活动均值 {result.mean_rad_s:.3g} rad/s · 峰值 {result.max_rad_s:.3g} rad/s'
+        diagnostic = dict(recipe=recipe, rate_unit='rad/s', mean_rad_s=result.mean_rad_s,
+            max_rad_s=result.max_rad_s, dt_s=result.dt_s, max_dt_s=max_dt_s,
+            coverage=coverage, validity=result.validity, reason=result.reason, warnings=list(result.warnings),
+            sequence=frame.sequence, previous_sequence=previous.sequence if previous is not None else None,
+            previous_sim_time_s=previous.sim_time_s if previous is not None else None,
+            aggregation='sum of tile rates / current material site count; equals material mean on full coverage')
+        if 'sequence_inferred:v1' in frame.provenance:
+            diagnostic['warnings'].append('source sequences inferred from v1 records; sequence gaps cannot be detected')
     else:
         raise ValueError('unknown field recipe')
-    validity = 'valid' if coverage == 1 else 'invalid'
+    validity = validity_override or ('valid' if coverage == 1 else 'invalid')
     sample = Sample(frame.sim_time_s, tuple(observations), frame.sequence, frame.segment_id,
                     validity, coverage, frame.source_kind, time_kind=frame.time_kind)
     diagnostic.update(source_kind=frame.source_kind, entity_id=frame.entity_id, provenance=frame.provenance,

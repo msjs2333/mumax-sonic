@@ -2,7 +2,24 @@
 
 面向微磁与相关磁性连续场仿真的空间可听化工具：用可解释的声音辅助感知状态、运动、频带活动与拓扑结构，并通过可调关注区域分配听觉注意力。
 
-**状态：P2a 场观察与回放原型可运行。** 在 P1 空间声音基础上，新增二维拓扑计算、显式基底下的连续取向和 NPZ 三分量场回放。已用解析场验证，尚未验证真实 MuMax 输出；活动、频带、自动壁追踪和头追仍待实现。见 [P2a 实现与验证](docs/p2a-validation.md)。
+**状态：P2b 活动观察与回放时间处理已实现。** 在拓扑、连续取向与 NPZ 回放基础上，新增局部角变化率、倍速、逐帧/跳转与缺帧检查。已用解析场验证，尚未验证真实 MuMax 输出；频带、自动壁追踪和头追仍待实现。见 [P2b 实现与验证](docs/p2b-validation.md)。
+
+## 运行活动观察
+
+```powershell
+python launch.py --field-demo activity_localized
+python launch.py --field-demo activity_rotation
+```
+
+活动量使用完整 XYZ 方向和源数据相邻两帧的物理时间差，单位 rad/s。首帧等待前一帧；点击“下一帧”或“播放”得到测量值。倍速只改变浏览速度，暂停探听保留当前区间的测量值。跳转重新取源数据中的相邻帧，不跨跳转位置计算差分。
+
+```powershell
+python scripts/make_field_demo.py local/activity.npz --scenario activity_rotation --frames 40 --drop-frame 15
+python launch.py --replay local/activity.npz --recipe activity
+python launch.py --inspect-field local/activity.npz --recipe activity --report local/activity.json
+```
+
+窗口的“回放配方”切换拓扑/活动；“最大间隔/ns”可限制允许计算的物理间隔，留空不推断采样周期，命令行对应 `--max-dt-ps`。真实序号缺口始终使该帧活动未就绪。默认听觉参考为 `1e9 rad/s`，可用 `--activity-reference-rad-s` 调整，不改物理值。活动没有正负符号，窗口停用正负 solo；圈大小使用同一听觉参考。
 
 ## 运行场观察
 
@@ -22,7 +39,7 @@ python launch.py --replay local/pair.npz
 python launch.py --inspect-field local/pair.npz --method finite_difference --report local/pair.json
 ```
 
-“加载场”打开同一 NPZ 格式，当前 GUI 回放使用拓扑配方。文件生成不覆盖已有文件。格式、积分域、质量状态和限制见 [P2a 文档](docs/p2a-validation.md)；NPZ 是本项目交换格式，尚不直接读取 OVF。
+“加载场”打开 NPZ，当前 GUI 回放支持拓扑或活动。保存格式已升级到 v2，保留原始帧序号和逐帧来源；仍可读 v1，但 v1 没有帧序号，无法据此检测缺帧，界面会提示。文件生成不覆盖已有文件。格式见 [P2b 文档](docs/p2b-validation.md)，拓扑边界见 [P2a 文档](docs/p2a-validation.md)；NPZ 尚不直接读取 OVF。
 
 ## 运行 P1
 

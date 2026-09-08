@@ -102,3 +102,53 @@ def test_physical_field_scenes_and_roi_preserve_topology(app):
     app._tick()
     assert app.field_view.diagnostic['recipe'] == 'direction'
     assert app.scene.sources and all(s.orientation_enabled for s in app.scene.sources)
+
+
+def test_activity_navigation_and_pause_do_not_create_rates(app):
+    from mumax_sonic.ui.app import FIELD_SCENARIOS
+    from mumax_sonic.sources.activity_demo import OMEGA_RAD_S, STEP_S
+    app.scenario.set(FIELD_SCENARIOS['field:activity_rotation'])
+    app.reset()
+    app._tick()
+    assert app.sample.validity == 'warming_up' and not app.scene.sources
+    app.step_frame(1)
+    app.mode.set('negative')  # unsigned activity cannot be hidden by an old sign solo
+    app._tick()
+    assert app.field_view.diagnostic['mean_rad_s'] == pytest.approx(OMEGA_RAD_S)
+    assert app.scene.sources
+    assert all('disabled' in button.state() for button in app.sign_buttons)
+    before = app.sample
+    app.speed.set('4')
+    app.change_speed()
+    app._tick()
+    assert app.sample is before  # same physical pair, even during a paused fast-play setting
+    app.static.set(False)
+    app._tick()
+    assert not app.scene.sources
+    assert app.field_view.diagnostic['mean_rad_s'] == pytest.approx(OMEGA_RAD_S)
+    app.seek_to(8*STEP_S)
+    app._tick()
+    app.seek_to(2*STEP_S)
+    app._tick()
+    assert app.field_view.diagnostic['mean_rad_s'] == pytest.approx(OMEGA_RAD_S)
+    app.max_dt_ns.set('0.025')
+    app.apply_max_dt()
+    app._tick()
+    assert app.sample.validity == 'warming_up'
+
+
+def test_replay_activity_gap_and_recovery_in_window(app):
+    from mumax_sonic.sources.activity_demo import make_activity_frame, STEP_S, OMEGA_RAD_S
+    from mumax_sonic.sources.replay import FieldReplay
+    app.replay = FieldReplay(tuple(make_activity_frame('activity_rotation', i) for i in (0, 1, 4, 5)), 'test-gap')
+    app._labels['测试回放'] = 'replay'
+    app.scenario.set('测试回放')
+    app.replay_recipe.set('活动')
+    app.seek_to(4*STEP_S)
+    app._tick()
+    assert app.sample.validity == 'warming_up' and not app.scene.sources
+    app.step_frame(1)
+    app._tick()
+    assert app.field_view.diagnostic['mean_rad_s'] == pytest.approx(OMEGA_RAD_S)
+    assert app.sample.validity == 'valid' and app.scene.sources
+    assert not app.transport.playing  # end of replay holds measured result
