@@ -1,0 +1,29 @@
+# Local environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local experiments and large generated artifacts
+local/
+.tmp/
+runs/
+outputs/
+artifacts/
+
+# Build and editor files
+build/
+dist/
+*.egg-info/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local credentials and environment settings
+.env
+.env.*
+!.env.example
