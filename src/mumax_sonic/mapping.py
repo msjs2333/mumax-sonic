@@ -20,11 +20,11 @@ def map_sample(sample: Sample, attention: Attention, *, mode: str = "both",
     result = []
     for o in select_sources(candidates, attention, budget):
         x, y, _ = o.position_m
-        azimuth = max(-1, min(1, x / attention.extent_m)) * pi / 3
-        elevation = max(-1, min(1, y / attention.extent_m)) * pi / 6
+        azimuth = max(-1, min(1, (x-attention.origin_m[0]) / attention.extent_m)) * pi / 3
+        elevation = max(-1, min(1, (y-attention.origin_m[1]) / attention.extent_m)) * pi / 6
         position = (sin(azimuth)*cos(elevation), sin(elevation), -cos(azimuth)*cos(elevation))
         # Same fixed reference (strength=1) and bus headroom for both signs.
         # No per-frame/per-sign normalization, including during solo.
         gain = master_gain / budget * sqrt(min(o.strength, 1.0)) * attention.weight(o)
-        result.append(SonicSource(o.source_id, position, gain, o.sign, o.orientation_rad))
+        result.append(SonicSource(o.source_id, position, gain, o.sign, o.orientation_rad, o.orientation_enabled))
     return SonicScene(tuple(result), sample.sim_time_s)

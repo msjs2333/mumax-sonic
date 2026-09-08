@@ -18,6 +18,7 @@ class Observation:
     entity_id: str = "demo"
     quantity: str = "synthetic_strength"
     unit: str = "1"
+    orientation_enabled: bool = False
 
     def __post_init__(self):
         object.__setattr__(self, "position_m", tuple(self.position_m))
@@ -65,6 +66,8 @@ class SonicSource:
     gain: float                         # nonnegative linear amplitude
     sign: int = 1
     orientation_rad: float = 0.0
+
+    orientation_enabled: bool = False
 
     def __post_init__(self):
         object.__setattr__(self, "position", tuple(self.position))

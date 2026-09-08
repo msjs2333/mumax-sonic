@@ -196,7 +196,7 @@ def test_engine_latest_wins_stops_and_reports_control_latency(monkeypatch, tmp_p
     assert diagnostic["hrtf_status"] == "enabled"
     assert diagnostic["dropped_updates"] == 1
     assert diagnostic["control_apply_latency_ms"] is not None
-    assert diagnostic["orientation_mapping"] == "not implemented in P1"
+    assert "optional periodic" in diagnostic["orientation_mapping"]
     json.dumps(diagnostic)
     assert fake.source_gains[20] > 0
     drops_after_burst = diagnostic["dropped_updates"]

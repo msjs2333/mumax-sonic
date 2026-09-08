@@ -14,6 +14,10 @@ from ..model import SonicScene
 from ..session import Transport
 from ..sources.synthetic import SCENARIOS, make_sample
 
+FIELD_SCENARIOS = {'field:skyrmion': '拓扑 · 解析单纹理', 'field:opposite_pair': '拓扑 · 正负净零双纹理',
+                   'field:uniform': '拓扑 · 均匀场', 'field:wall_inplane': '取向 · 面内域轴',
+                   'field:wall_pma': '取向 · 面外域轴'}
+
 BG = "#101823"
 PANEL = "#182434"
 TEXT = "#e6edf5"
@@ -53,6 +57,11 @@ class SonicApp:
         self.sample = None
         self.scene = SonicScene()
         self._labels = {v: k for k, v in SCENARIOS.items()}
+        self._labels.update({v: k for k, v in FIELD_SCENARIOS.items()})
+        self.field_view = None
+        self.replay = None
+        self._field_cache = None
+        self._field_key = None
         self.scenario = tk.StringVar(value=next(iter(SCENARIOS.values())))
         self.mode = tk.StringVar(value="both")
         self.radius = tk.DoubleVar(value=0.55)
@@ -64,6 +73,8 @@ class SonicApp:
         self.status = tk.StringVar(value="无声预览" if no_audio else "尚未开启音频 · 点击“开始试听”")
         self.time_label = tk.StringVar()
         self.summary = tk.StringVar()
+        self.subtitle = tk.StringVar(value='P1 合成声源 / P2a 三分量场观察')
+        self.legend = tk.StringVar(value='绿色 + / 紫色 −\n位置表示方位，音色表示符号\n主声场最多 4 路 · 虚拟距离固定')
         self._build()
         self.window.protocol("WM_DELETE_WINDOW", self.close)
         self.window.bind("<space>", lambda event: self.toggle_play())
@@ -73,7 +84,7 @@ class SonicApp:
         w = self.window
         # Keep the full control panel visible even with Windows desktop scaling.
         w.tk.call("tk", "scaling", 96 / 72)
-        w.title("MuMax-Sonic · P1 空间听觉实验室")
+        w.title("MuMax-Sonic · 场观察与空间听觉")
         w.geometry("1120x940")
         w.minsize(1050, 900)
         w.configure(bg=BG)
@@ -94,12 +105,13 @@ class SonicApp:
         shell = ttk.Frame(w, padding=22)
         shell.pack(fill="both", expand=True)
         ttk.Label(shell, text="MuMax-Sonic", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(shell, text="P1 · 合成声源演示 / Synthetic demo · 尚未计算物理拓扑荷", style="Muted.TLabel").pack(anchor="w", pady=(2, 14))
+        ttk.Label(shell, textvariable=self.subtitle, style="Muted.TLabel").pack(anchor="w", pady=(2, 14))
         toolbar = ttk.Frame(shell)
         toolbar.pack(fill="x", pady=(0, 12))
         ttk.Label(toolbar, text="场景").pack(side="left", padx=(0, 8))
         combo = ttk.Combobox(toolbar, textvariable=self.scenario, values=list(self._labels), state="readonly", width=24)
         combo.pack(side="left")
+        self.scenario_combo = combo
         combo.bind("<<ComboboxSelected>>", lambda e: self.reset())
         self.play_button = ttk.Button(toolbar, text="播放", command=self.toggle_play)
         self.play_button.pack(side="left", padx=8)
@@ -122,7 +134,7 @@ class SonicApp:
         ttk.Label(controls, text="正负声部 · 共用强度标尺").pack(anchor="w", pady=(16, 6))
         for value, label in (("both", "同时听正负"), ("positive", "仅正声部 +"), ("negative", "仅负声部 −")):
             ttk.Radiobutton(controls, text=label, value=value, variable=self.mode).pack(anchor="w", pady=3)
-        ttk.Label(controls, text="绿色 + / 紫色 −\n位置表示方位，音色表示符号\n主声场最多 4 路 · 虚拟距离固定", style="Muted.TLabel").pack(anchor="w", pady=12)
+        ttk.Label(controls, textvariable=self.legend, style="Muted.TLabel").pack(anchor="w", pady=12)
         ttk.Label(shell, textvariable=self.summary, style="Muted.TLabel").pack(anchor="w", pady=(9, 5))
         columns = ("id", "sign", "xy", "strength", "gain", "angle")
         self.table = ttk.Treeview(shell, columns=columns, show="headings", height=4, selectmode="none")
@@ -132,13 +144,14 @@ class SonicApp:
         self.table.pack(fill="x")
         audio_row = ttk.Frame(shell)
         audio_row.pack(fill="x", pady=(12, 6))
-        self.device_combo = ttk.Combobox(audio_row, textvariable=self.device, values=["系统默认设备"], state="readonly", width=29)
+        self.device_combo = ttk.Combobox(audio_row, textvariable=self.device, values=["系统默认设备"], state="readonly", width=23)
         self.device_combo.pack(side="left")
         ttk.Checkbutton(audio_row, text="请求 HRTF", variable=self.hrtf).pack(side="left", padx=8)
-        self.audio_button = ttk.Button(audio_row, text="开始试听 / 重连", command=self.open_audio)
+        self.audio_button = ttk.Button(audio_row, text="试听 / 重连", command=self.open_audio)
         self.audio_button.pack(side="left")
         ttk.Button(audio_row, text="静音", command=self.mute).pack(side="left", padx=6)
         ttk.Button(audio_row, text="刷新设备", command=self.refresh_devices).pack(side="left")
+        ttk.Button(audio_row, text="加载场", command=self.load_field).pack(side="left", padx=4)
         ttk.Button(audio_row, text="导出诊断", command=self.export_diagnostics).pack(side="right")
         ttk.Label(shell, textvariable=self.status, style="Muted.TLabel", wraplength=1040).pack(anchor="w")
 
@@ -192,8 +205,54 @@ class SonicApp:
         self.play_button.configure(text="暂停" if self.transport.playing else "播放")
 
     def reset(self):
-        self.transport.sim_time_s = 0.0
+        self.transport.sim_time_s = self.replay.frames[0].sim_time_s if self.replay and self._labels[self.scenario.get()] == 'replay' else 0.0
         self.sequence = 0
+
+    def load_field(self):
+        path = filedialog.askopenfilename(filetypes=[('Vector replay', '*.npz')])
+        if not path:
+            return
+        try:
+            from ..sources.replay import load_replay
+            self.replay = load_replay(path)
+            self._labels['回放 · 二维拓扑'] = 'replay'
+            self.scenario_combo.configure(values=list(self._labels))
+            self.scenario.set('回放 · 二维拓扑')
+            self._field_key = None
+            self.reset()
+        except Exception as exc:
+            self.status.set(f'场文件加载失败：{exc}')
+
+    def _get_field_view(self, scenario):
+        from ..fields import FieldFrame
+        from ..field_pipeline import observe_field
+        from ..sources.analytic import make_field
+        if scenario == 'replay':
+            frame = self.replay.at(self.transport.sim_time_s)
+            key = (scenario, self.replay.sha256, frame.sequence)
+            recipe, axes = 'topology', {}
+            if self.transport.sim_time_s >= self.replay.frames[-1].sim_time_s:
+                self.transport.sim_time_s = self.replay.frames[-1].sim_time_s
+                self.transport.playing = False
+                self.play_button.configure(text='播放')
+        else:
+            name = scenario.split(':', 1)[1]
+            tick = int(self.transport.sim_time_s / 5e-11) if name.startswith('wall') else 0
+            key = (scenario, tick)
+            if key == self._field_key:
+                return self._field_cache
+            t = tick*5e-11
+            vectors = make_field(name, t)
+            spacing = 2e-6/(vectors.shape[1]-1)
+            frame = FieldFrame(vectors, spacing, spacing, t, (-1e-6, -1e-6, 0),
+                               sequence=tick, time_kind='dynamics' if name.startswith('wall') else 'static',
+                               provenance=f'analytic:{name}')
+            recipe = 'direction' if name.startswith('wall') else 'topology'
+            axes = dict(domain_axis=(0, 0, 1), reference_axis=(1, 0, 0)) if name == 'wall_pma' else {}
+        if key != self._field_key:
+            self._field_cache = observe_field(frame, recipe, **axes)
+            self._field_key = key
+        return self._field_cache
 
     def bounds(self):
         return (35, 28, max(100, self.canvas.winfo_width()-35), max(100, self.canvas.winfo_height()-34))
@@ -213,6 +272,22 @@ class SonicApp:
             px, py = xy(v, v)
             c.create_line(px, top, px, bottom, fill="#2b3b4c")
             c.create_line(left, py, right, py, fill="#2b3b4c")
+        if self.field_view is not None:
+            # Sparse XYZ view: arrow XY, colour encodes laboratory z.
+            field = self.field_view.field
+            vectors = field.vectors
+            for j in range(0, vectors.shape[0], max(1, vectors.shape[0]//12)):
+                for i in range(0, vectors.shape[1], max(1, vectors.shape[1]//12)):
+                    u = vectors[j, i]
+                    norm = math.sqrt(sum(float(v)**2 for v in u))
+                    if not field.mask[j, i] or not math.isfinite(norm) or norm < 1e-12:
+                        continue
+                    u = u/norm
+                    px, py = xy((field.origin_m[0]+i*field.dx_m-attention.origin_m[0])/attention.extent_m,
+                                (field.origin_m[1]+j*field.dy_m-attention.origin_m[1])/attention.extent_m)
+                    color = '#688cbe' if u[2] >= 0 else '#bc8063'
+                    c.create_line(px-7*u[0], py+7*u[1], px+7*u[0], py-7*u[1], fill=color, arrow='last')
+                    c.create_oval(px-2, py-2, px+2, py+2, fill=color, outline='')
         c.create_text(left, 12, text="+y 向上 / 仰角", fill=MUTED, anchor="w")
         c.create_text(right, bottom+19, text="+x 向右 / 方位角", fill=MUTED, anchor="e")
         cx, cy = xy(*self.center)
@@ -222,7 +297,7 @@ class SonicApp:
         c.create_line(cx, cy-5, cx, cy+5, fill="#e7bd75")
         gains = {s.source_id: s.gain for s in self.scene.sources}
         for i, o in enumerate(self.sample.observations):
-            px, py = xy(o.position_m[0]/1e-6, o.position_m[1]/1e-6)
+            px, py = xy((o.position_m[0]-attention.origin_m[0])/attention.extent_m, (o.position_m[1]-attention.origin_m[1])/attention.extent_m)
             color = POS if o.sign > 0 else NEG
             radius = 8 + 14*math.sqrt(min(o.strength, 1))
             # Concentric sign outlines preserve true position for colocated sources.
@@ -230,10 +305,12 @@ class SonicApp:
                 radius += 4
             c.create_oval(px-radius, py-radius, px+radius, py+radius, outline=color,
                           width=3 if gains.get(o.source_id, 0) > 0 else 1)
-            c.create_text(px, py + (radius+13)*(1 if o.sign > 0 else -1),
-                          text=("+ " if o.sign > 0 else "− ")+o.source_id, fill=color)
+            if self.field_view is None or gains.get(o.source_id, 0) > 0:
+                c.create_text(px, py + (radius+13)*(1 if o.sign > 0 else -1),
+                              text=('φ ' if o.orientation_enabled else ("+ " if o.sign > 0 else "− "))+o.source_id, fill=color)
             a = o.orientation_rad
-            c.create_line(px, py, px+radius*math.cos(a), py-radius*math.sin(a), fill=color, arrow="last")
+            if o.orientation_enabled or self.field_view is None:
+                c.create_line(px, py, px+radius*math.cos(a), py-radius*math.sin(a), fill=color, arrow="last")
         if self.sample.validity != "valid":
             c.create_text((left+right)/2, (top+bottom)/2, text=f"数据状态：{self.sample.validity}\n物理声源静音", fill="#ffc092", font=("Microsoft YaHei UI", 16, "bold"))
 
@@ -254,9 +331,21 @@ class SonicApp:
             self.audio_ready = ok and not self._mute_requested
             self.status.set(("已静音" if self._mute_requested else "音频已开启") if ok else f"无法开启音频：{error}")
         scenario = self._labels[self.scenario.get()]
-        self.sample = make_sample(scenario, self.transport.sim_time_s, self.sequence)
+        if scenario.startswith('field:') or scenario == 'replay':
+            try:
+                self.field_view = self._get_field_view(scenario)
+                self.sample = self.field_view.sample
+            except Exception as exc:
+                self.field_view = None
+                self.sample = make_sample('invalid', self.transport.sim_time_s, self.sequence)
+                self.status.set(f'场观察失败：{exc}')
+        else:
+            self.field_view = None
+            self.sample = make_sample(scenario, self.transport.sim_time_s, self.sequence)
         self.sequence += 1
-        attention = Attention(self.center, self.radius.get(), self.background.get())
+        field = self.field_view.field if self.field_view else None
+        attention = Attention(self.center, self.radius.get(), self.background.get(),
+                              field.extent_m if field else 1e-6, field.center_m[:2] if field else (0, 0))
         self.scene = map_sample(self.sample, attention, mode=self.mode.get(), master_gain=self.master.get(), audible=self.transport.audible)
         if self.audio_ready and not self.opening:
             try:
@@ -272,6 +361,17 @@ class SonicApp:
         negative = sum(o.strength for o in self.sample.observations if o.sign < 0)
         orientation_note = " · 角标签仅可视化，尚未映射声音" if scenario == "orientation" else ""
         self.summary.set(f"标签强度 Σ+ {positive:.2f}   Σ− {negative:.2f}   净值 {positive-negative:.2f}   绝对和 {positive+negative:.2f}  · 非物理 Q   |   {self.sample.validity} · 覆盖 {self.sample.coverage:.0%}{orientation_note}")
+        if self.field_view:
+            self.summary.set(self.field_view.summary + f' | {self.sample.validity} · 覆盖 {self.sample.coverage:.0%}')
+            self.subtitle.set(f'P2a · {self.sample.source_kind} 三分量场 · {self.sample.observations[0].quantity if self.sample.observations else "有效域观测"} · 箭头 XY / 蓝橙为 ±z')
+            self.time_label.set(f'帧 t = {self.sample.sim_time_s*1e9:.2f} ns · 播放时标 1 ns/s')
+            if self.field_view.diagnostic['recipe'] == 'direction':
+                self.legend.set('φ：音高 + 起伏速率编码\n强度为横向投影面积权重\n非拓扑符号 · 使用正声部输出')
+            else:
+                self.legend.set('绿色 Q+ / 紫色 Q−\n圆为分块贡献，非粒子检测\n主声场最多 4 路 · 固定尺度')
+        else:
+            self.subtitle.set('P1 · Synthetic 标签演示 · 未计算物理拓扑荷')
+            self.legend.set('绿色 + / 紫色 −\n位置表示方位，音色表示符号\n主声场最多 4 路 · 虚拟距离固定')
         self._draw(attention)
         self.table.delete(*self.table.get_children())
         gains = {s.source_id: s.gain for s in self.scene.sources}
@@ -288,6 +388,10 @@ class SonicApp:
                        "scenario": self._labels[self.scenario.get()], "gain": self.master.get(),
                        "roi": {"center": self.center, "radius": self.radius.get(), "background": self.background.get()},
                        "audio": self.engine.diagnostics() if self.engine else {"state": "not_open"}}
+            if self.field_view:
+                payload.update(source_kind=self.sample.source_kind,
+                               physical_topology_computed=self.field_view.diagnostic['recipe'] == 'topology',
+                               field=self.field_view.diagnostic)
             Path(filename).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def close(self):
@@ -299,10 +403,20 @@ class SonicApp:
         self.window.destroy()
 
 
-def run(no_audio=False, dll_path=None):
+def run(no_audio=False, dll_path=None, field_demo=None, replay_path=None):
     configure_dpi()
     root = tk.Tk()
-    SonicApp(root, no_audio=no_audio, dll_path=dll_path)
+    app = SonicApp(root, no_audio=no_audio, dll_path=dll_path)
+    if field_demo:
+        app.scenario.set(FIELD_SCENARIOS[f'field:{field_demo}'])
+        app.reset()
+    if replay_path:
+        from ..sources.replay import load_replay
+        app.replay = load_replay(replay_path)
+        app._labels['回放 · 二维拓扑'] = 'replay'
+        app.scenario_combo.configure(values=list(app._labels))
+        app.scenario.set('回放 · 二维拓扑')
+        app.reset()
     root.mainloop()
 
 

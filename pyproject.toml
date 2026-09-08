@@ -7,7 +7,7 @@ name = "mumax-sonic"
 version = "0.1.0"
 description = "Spatial auditory monitoring prototype for micromagnetic fields"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["numpy>=1.26,<3"]
 
 [project.optional-dependencies]
 test = ["pytest>=8"]

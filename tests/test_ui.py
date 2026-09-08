@@ -6,14 +6,22 @@ from mumax_sonic.ui.app import SonicApp, audio_status
 from mumax_sonic.sources.synthetic import SCENARIOS
 
 
-@pytest.fixture
-def app():
+@pytest.fixture(scope='module')
+def tk_root():
     try:
         root = tk.Tk()
     except tk.TclError as exc:
         pytest.skip(f"Tk display unavailable: {exc}")
     root.withdraw()
-    instance = SonicApp(root, no_audio=True)
+    yield root
+    root.destroy()
+
+
+@pytest.fixture
+def app(tk_root):
+    window = tk.Toplevel(tk_root)
+    window.withdraw()
+    instance = SonicApp(window, no_audio=True)
     yield instance
     instance.close()
 
@@ -58,3 +66,22 @@ def test_mute_during_device_open_remains_muted(app):
 def test_device_status_does_not_disguise_hrtf_failure():
     text = audio_status({"state": "open", "device": "test", "hrtf_status": "denied"})
     assert "未启用" in text
+
+
+def test_physical_field_scenes_and_roi_preserve_topology(app):
+    from mumax_sonic.ui.app import FIELD_SCENARIOS
+    app.scenario.set(FIELD_SCENARIOS['field:opposite_pair'])
+    app._tick()
+    assert app.field_view.diagnostic['q_abs'] == pytest.approx(2)
+    original = app.field_view.diagnostic.copy()
+    app.move_roi(SimpleNamespace(x=50, y=50))
+    app.mode.set('negative')
+    app._tick()
+    assert app.field_view.diagnostic == original
+    assert all(s.sign == -1 for s in app.scene.sources)
+    app.mode.set('both')
+    app.scenario.set(FIELD_SCENARIOS['field:wall_pma'])
+    app.transport.sim_time_s = 1e-9
+    app._tick()
+    assert app.field_view.diagnostic['recipe'] == 'direction'
+    assert app.scene.sources and all(s.orientation_enabled for s in app.scene.sources)

@@ -13,7 +13,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from math import sin, sqrt, tau
+from math import cos, sin, sqrt, tau
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +73,19 @@ class _LiveSource:
     position: tuple[float, float, float] = (0.0, 0.0, 0.0)
     target_position: tuple[float, float, float] = (0.0, 0.0, 0.0)
     started: bool = False
+    orientation_enabled: bool = False
+    orientation_rad: float = 0.0
+    pitch: float = 1.0
+    modulation_hz: float = 4.0
+    modulation_phase: float = 0.0
+
+
+def orientation_controls(angle_rad):
+    """Two periodic controls retain both cos(phi) and sin(phi), no wrap seam.
+
+    This is a listening code, not a magnetic oscillation frequency.
+    """
+    return 2 ** (0.25*cos(angle_rad)), 4.0 + 2.0*sin(angle_rad)
 
 
 def _dll_candidates(explicit: str | None = None) -> list[Path]:
@@ -266,7 +279,7 @@ class AudioEngine:
         return {
             "state": "closed", "dll_path": None, "device": None, "renderer": None,
             "requested_device": None, "vendor": None, "version": None, "hrtf_requested": False, "hrtf_status": "unknown",
-            "connected": None, "orientation_mapping": "not implemented in P1",
+            "connected": None, "orientation_mapping": "optional periodic pitch/tremolo; P1 labels unchanged",
             "last_error": None, "unexpected_stopped_sources": 0,
             "control_apply_latency_ms": None, "control_apply_latency_p95_ms": None,
             "dropped_updates": 0, "scene_age_ms": None, "scene_validity": None,
@@ -505,6 +518,8 @@ class AudioEngine:
                                 live.started = False
                             live.target_gain = item.gain
                             live.target_position = item.position
+                            live.orientation_enabled = item.orientation_enabled
+                            live.orientation_rad = item.orientation_rad
                         for source_id, live in sources.items():
                             if source_id not in seen:
                                 live.target_gain = 0.0
@@ -527,7 +542,13 @@ class AudioEngine:
                 for source_id, live in list(sources.items()):
                     live.gain += (live.target_gain - live.gain) * alpha
                     live.position = tuple(current + (target - current) * alpha for current, target in zip(live.position, live.target_position))
-                    al.alSourcef(live.source, AL_GAIN, max(0.0, live.gain))
+                    pitch, rate = orientation_controls(live.orientation_rad) if live.orientation_enabled else (1.0, 4.0)
+                    live.pitch += (pitch-live.pitch)*alpha
+                    live.modulation_hz += (rate-live.modulation_hz)*alpha
+                    live.modulation_phase = (live.modulation_phase + tau*live.modulation_hz*dt) % tau
+                    modulation = (1 + 0.25*sin(live.modulation_phase))/1.25 if live.orientation_enabled else 1.0
+                    al.alSourcef(live.source, AL_PITCH, live.pitch)
+                    al.alSourcef(live.source, AL_GAIN, max(0.0, live.gain)*modulation)
                     al.alSource3f(live.source, AL_POSITION, *live.position)
                     if live.gain > 0.0001:
                         state = ctypes.c_int()

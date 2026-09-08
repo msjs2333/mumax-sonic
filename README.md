@@ -2,7 +2,27 @@
 
 面向微磁与相关磁性连续场仿真的空间可听化工具：用可解释的声音辅助感知状态、运动、频带活动与拓扑结构，并通过可调关注区域分配听觉注意力。
 
-**状态：P1 合成声源原型可运行，人工听觉验收待完成。** 已实现 Windows OpenAL Soft / HRTF、手动关注区域、正负声部和静态探听；物理观察器、真实仿真回放与头追尚未实现。详见 [P1 验证记录](docs/p1-validation.md)。
+**状态：P2a 场观察与回放原型可运行。** 在 P1 空间声音基础上，新增二维拓扑计算、显式基底下的连续取向和 NPZ 三分量场回放。已用解析场验证，尚未验证真实 MuMax 输出；活动、频带、自动壁追踪和头追仍待实现。见 [P2a 实现与验证](docs/p2a-validation.md)。
+
+## 运行场观察
+
+在仓库根目录安装数值依赖并启动：
+
+```powershell
+python -m pip install "numpy>=1.26,<3"
+python launch.py --field-demo opposite_pair
+python launch.py --field-demo wall_inplane
+```
+
+默认无声，点击“试听 / 重连”打开音频；取向场景点击“播放”后连续扫角。下拉列表也提供均匀场、单纹理及面外域轴。拓扑显示计算所得 Q+/Q−/Qnet/Qabs；取向模式用音高和起伏速率编码角度，属于未完成人工标定的初步声音表达。P1 的测试音色保持原样。
+
+```powershell
+python scripts/make_field_demo.py local/pair.npz
+python launch.py --replay local/pair.npz
+python launch.py --inspect-field local/pair.npz --method finite_difference --report local/pair.json
+```
+
+“加载场”打开同一 NPZ 格式，当前 GUI 回放使用拓扑配方。文件生成不覆盖已有文件。格式、积分域、质量状态和限制见 [P2a 文档](docs/p2a-validation.md)；NPZ 是本项目交换格式，尚不直接读取 OVF。
 
 ## 运行 P1
 
@@ -13,7 +33,7 @@ python scripts/install_audio.py
 python launch.py
 ```
 
-安装脚本从官方获取固定版本 OpenAL Soft 1.25.2，校验 SHA256，仅放入 `local/`。不需要 GPU；Python 运行部分使用标准库。已有 DLL 可用 `--dll` 指定完整路径。只预览界面用 `python launch.py --no-audio`。
+安装脚本从官方获取固定版本 OpenAL Soft 1.25.2，校验 SHA256，仅放入 `local/`。不需要 GPU；P1 音频使用标准库，P2a 场计算需要 NumPy。已有 DLL 可用 `--dll` 指定完整路径。只预览界面用 `python launch.py --no-audio`。
 
 窗口默认不发声。选择耳机输出设备，点击“开始试听 / 重连”，从较低音量开始；“播放”推进合成时间，“暂停时探听静态”决定暂停后是否仍能听当前状态。拖动画面移动关注区域，调节半径与背景比例，再比较正负 solo。切换设备或 HRTF 请求后点击重连，底部显示实际 HRTF 状态。HRTF 对照时应避免叠加其他空间音效。
 

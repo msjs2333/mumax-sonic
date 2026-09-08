@@ -10,9 +10,13 @@ class Attention:
     radius: float = 0.55
     background: float = 0.15
     extent_m: float = 1e-6
+    origin_m: tuple[float, float] = (0.0, 0.0)  # viewport centre in physical XY
 
     def __post_init__(self):
         object.__setattr__(self, "center", tuple(self.center))
+        object.__setattr__(self, "origin_m", tuple(self.origin_m))
+        if len(self.origin_m) != 2 or not all(isfinite(v) for v in self.origin_m):
+            raise ValueError("invalid viewport origin")
         if len(self.center) != 2 or not all(isfinite(v) for v in self.center):
             raise ValueError("invalid ROI center")
         if not all(isfinite(v) for v in (self.radius, self.background, self.extent_m)):
@@ -23,7 +27,7 @@ class Attention:
 
     def distance(self, observation: Observation) -> float:
         x, y, _ = observation.position_m
-        return hypot(x / self.extent_m - self.center[0], y / self.extent_m - self.center[1])
+        return hypot((x-self.origin_m[0]) / self.extent_m - self.center[0], (y-self.origin_m[1]) / self.extent_m - self.center[1])
 
     def contains(self, observation: Observation) -> bool:
         return self.distance(observation) <= self.radius

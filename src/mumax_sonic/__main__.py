@@ -15,10 +15,23 @@ def main():
     parser.add_argument("--device", help="Exact OpenAL device name for doctor/smoke")
     parser.add_argument("--no-hrtf", action="store_true", help="Use non-HRTF output for doctor/smoke comparison")
     parser.add_argument("--report", type=Path, help="Write diagnostics JSON for doctor/smoke")
+    parser.add_argument('--field-demo', choices=['uniform', 'skyrmion', 'opposite_pair', 'wall_inplane', 'wall_pma'], help='Open an analytical vector-field scene')
+    parser.add_argument('--replay', type=Path, help='Open a vector NPZ replay in the GUI')
+    parser.add_argument('--inspect-field', type=Path, help='Compute and print topology of all NPZ frames without audio')
+    parser.add_argument('--method', choices=['solid_angle', 'finite_difference'], default='solid_angle', help='Method for --inspect-field')
     args = parser.parse_args()
     if args.audio_smoke is not None and (not math.isfinite(args.audio_smoke) or not 1 <= args.audio_smoke <= 1800):
         parser.error("--audio-smoke must be between 1 and 1800 seconds")
-    if args.doctor or args.audio_smoke is not None:
+    if args.inspect_field:
+        from .sources.replay import load_replay
+        from .field_pipeline import observe_field
+        replay = load_replay(args.inspect_field)
+        report = {'sha256': replay.sha256, 'frames': [observe_field(f, method=args.method).diagnostic for f in replay.frames]}
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        if args.report:
+            args.report.parent.mkdir(parents=True, exist_ok=True)
+            args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+    elif args.doctor or args.audio_smoke is not None:
         from .audio import AudioConfig, AudioEngine, enumerate_devices
         from .attention import Attention
         from .mapping import map_sample
@@ -55,7 +68,7 @@ def main():
             raise SystemExit(1)
     else:
         from .ui.app import run
-        run(no_audio=args.no_audio, dll_path=args.dll)
+        run(no_audio=args.no_audio, dll_path=args.dll, field_demo=args.field_demo, replay_path=args.replay)
 
 
 if __name__ == "__main__":

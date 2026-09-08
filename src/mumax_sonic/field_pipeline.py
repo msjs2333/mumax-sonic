@@ -1,0 +1,78 @@
+"""Field observations are computed before attention and audio source selection."""
+from dataclasses import dataclass
+import numpy as np
+from .fields import FieldFrame
+from .model import Observation, Sample
+from .observers.topology import topology
+from .observers.texture import direction_angle
+
+
+@dataclass(frozen=True)
+class FieldView:
+    field: FieldFrame
+    sample: Sample
+    summary: str
+    diagnostic: dict
+
+
+def _tiles(shape, divisions=4):
+    for j, rows in enumerate(np.array_split(np.arange(shape[0]), min(divisions, shape[0]))):
+        for i, cols in enumerate(np.array_split(np.arange(shape[1]), min(divisions, shape[1]))):
+            yield f'{j}-{i}', np.ix_(rows, cols)
+
+
+def observe_field(frame, recipe='topology', *, method='solid_angle', boundary='open',
+                  domain_axis=(1, 0, 0), reference_axis=(0, 1, 0)):
+    observations = []
+    if recipe == 'topology':
+        result = topology(frame.vectors, frame.dx_m, frame.dy_m, mask=frame.mask,
+                          method=method, boundary=boundary)
+        x, y = result.x_m + frame.origin_m[0], result.y_m + frame.origin_m[1]
+        for tile, index in _tiles(result.positive.shape):
+            for sign, channel in ((1, result.positive), (-1, result.negative)):
+                weights = np.where(result.valid[index], channel[index], 0.0)
+                total = float(np.sum(weights))
+                if total <= 0 or not np.isfinite(total):
+                    continue
+                position = (float(np.sum(x[index]*weights)/total),
+                            float(np.sum(y[index]*weights)/total), frame.origin_m[2])
+                observations.append(Observation(f'q:{tile}:{sign:+d}', position, total, sign,
+                                                entity_id=frame.entity_id, quantity=f'Q_tile_{method}', unit='1'))
+        coverage = result.coverage
+        summary = f'Q+ {result.q_pos:.4f}  Q− {result.q_neg:.4f}  Qnet {result.q_net:.4f}  Qabs {result.q_abs:.4f}'
+        diagnostic = dict(recipe=recipe, method=method, boundary=boundary, surface='+z',
+                          q_pos=result.q_pos, q_neg=result.q_neg, q_net=result.q_net,
+                          q_abs=result.q_abs, coverage=coverage, warnings=list(result.warnings))
+    elif recipe == 'direction':
+        result = direction_angle(frame.vectors, domain_axis, reference_axis, mask=frame.mask)
+        ny, nx = frame.vectors.shape[:2]
+        x, y = np.meshgrid(np.arange(nx)*frame.dx_m+frame.origin_m[0],
+                           np.arange(ny)*frame.dy_m+frame.origin_m[1])
+        # Transverse projection highlights a declared antiparallel-domain core.
+        # It is not automatic wall detection or object tracking.
+        for tile, index in _tiles(result.valid.shape):
+            weights = np.where(result.valid[index], np.sum(result.projection[index]**2, axis=-1), 0.0)
+            total = float(np.sum(weights))
+            if total <= 1e-12:
+                continue
+            angle = np.where(result.valid[index], result.angle_rad[index], 0)
+            circular = np.sum(weights*np.exp(1j*angle))
+            if abs(circular) <= 1e-6*total:
+                continue  # opposing directions have no single aggregate angle
+            position = (float(np.sum(x[index]*weights)/total), float(np.sum(y[index]*weights)/total), frame.origin_m[2])
+            observations.append(Observation(f'phi:{tile}', position, total/(ny*nx), 1,
+                float(np.angle(circular)), frame.entity_id, 'transverse_area_fraction', '1', True))
+        finite = np.all(np.isfinite(frame.vectors), axis=-1) & (np.linalg.norm(frame.vectors, axis=-1)>1e-12)
+        coverage = float(np.sum(finite & frame.mask)/np.sum(frame.mask)) if np.any(frame.mask) else 0.0
+        summary = f'连续取向 · 有效投影 {np.count_nonzero(result.valid)}/{np.count_nonzero(frame.mask)} · 固定声明基底'
+        diagnostic = dict(recipe=recipe, domain_axis=list(result.d), e1=list(result.e1), e2=list(result.e2),
+                          coverage=coverage, angle_unit='rad', automatic_wall_detection=False)
+    else:
+        raise ValueError('unknown field recipe')
+    validity = 'valid' if coverage == 1 else 'invalid'
+    sample = Sample(frame.sim_time_s, tuple(observations), frame.sequence, frame.segment_id,
+                    validity, coverage, frame.source_kind, time_kind=frame.time_kind)
+    diagnostic.update(source_kind=frame.source_kind, entity_id=frame.entity_id, provenance=frame.provenance,
+                      shape=list(frame.vectors.shape), dx_m=frame.dx_m, dy_m=frame.dy_m,
+                      origin_m=list(frame.origin_m), sim_time_s=frame.sim_time_s)
+    return FieldView(frame, sample, summary, diagnostic)
