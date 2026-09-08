@@ -68,6 +68,23 @@ def test_device_status_does_not_disguise_hrtf_failure():
     assert "未启用" in text
 
 
+def test_roi_outline_is_independent_of_output_selection(app):
+    from mumax_sonic.attention import Attention
+    from mumax_sonic.mapping import map_sample
+    from mumax_sonic.model import Observation, Sample
+    inside = tuple(Observation(f'in-{i}', (i*1e-8, 0, 0), .1+i*.1) for i in range(5))
+    outside = Observation('out', (.9e-6, 0, 0), 1)
+    app.sample = Sample(0, inside+(outside,))
+    attention = Attention()
+    app.scene = map_sample(app.sample, attention)
+    app._draw(attention)
+    assert not app.audio_ready  # still a preview, no device claim
+    assert all(float(app.canvas.itemcget(f'source:{o.source_id}', 'width')) == 3 for o in inside)
+    assert float(app.canvas.itemcget('source:out', 'width')) == 1
+    assert app.canvas.find_withtag('selected:out')
+    assert sum(bool(app.canvas.find_withtag(f'selected:{o.source_id}')) for o in inside) == 3
+
+
 def test_physical_field_scenes_and_roi_preserve_topology(app):
     from mumax_sonic.ui.app import FIELD_SCENARIOS
     app.scenario.set(FIELD_SCENARIOS['field:opposite_pair'])

@@ -136,9 +136,9 @@ class SonicApp:
             ttk.Radiobutton(controls, text=label, value=value, variable=self.mode).pack(anchor="w", pady=3)
         ttk.Label(controls, textvariable=self.legend, style="Muted.TLabel").pack(anchor="w", pady=12)
         ttk.Label(shell, textvariable=self.summary, style="Muted.TLabel").pack(anchor="w", pady=(9, 5))
-        columns = ("id", "sign", "xy", "strength", "gain", "angle")
+        columns = ("id", "sign", "xy", "strength", "gain", "angle", "selection")
         self.table = ttk.Treeview(shell, columns=columns, show="headings", height=4, selectmode="none")
-        for key, label, width in zip(columns, ("声源", "符号", "位置 / µm", "原始强度", "播放增益", "角标签 / °"), (180, 65, 180, 130, 130, 130)):
+        for key, label, width in zip(columns, ("声源", "符号", "位置 / µm", "原始强度", "目标增益", "角标签 / °", "范围 / 输出候选"), (160, 55, 155, 100, 100, 100, 160)):
             self.table.heading(key, text=label)
             self.table.column(key, width=width, anchor="center")
         self.table.pack(fill="x")
@@ -290,6 +290,8 @@ class SonicApp:
                     c.create_oval(px-2, py-2, px+2, py+2, fill=color, outline='')
         c.create_text(left, 12, text="+y 向上 / 仰角", fill=MUTED, anchor="w")
         c.create_text(right, bottom+19, text="+x 向右 / 方位角", fill=MUTED, anchor="e")
+        c.create_text(left, bottom+19, text='粗圈：中心在范围内  ·  白点：输出候选（非设备发声状态）',
+                      fill=TEXT, anchor='w', font=('Microsoft YaHei UI', 8))
         cx, cy = xy(*self.center)
         rx, ry = attention.radius*(right-left)/2, attention.radius*(bottom-top)/2
         c.create_oval(cx-rx, cy-ry, cx+rx, cy+ry, outline="#e7bd75", width=2, dash=(6, 4))
@@ -304,7 +306,9 @@ class SonicApp:
             if o.sign < 0:
                 radius += 4
             c.create_oval(px-radius, py-radius, px+radius, py+radius, outline=color,
-                          width=3 if gains.get(o.source_id, 0) > 0 else 1)
+                          width=3 if attention.contains(o) else 1, tags=(f'source:{o.source_id}',))
+            if gains.get(o.source_id, 0) > 0:
+                c.create_oval(px-3, py-3, px+3, py+3, fill=TEXT, outline='', tags=(f'selected:{o.source_id}',))
             if self.field_view is None or gains.get(o.source_id, 0) > 0:
                 c.create_text(px, py + (radius+13)*(1 if o.sign > 0 else -1),
                               text=('φ ' if o.orientation_enabled else ("+ " if o.sign > 0 else "− "))+o.source_id, fill=color)
@@ -378,7 +382,8 @@ class SonicApp:
         for o in self.sample.observations:
             self.table.insert("", "end", values=(o.source_id, "+" if o.sign > 0 else "−",
                 f"{o.position_m[0]*1e6:.2f}, {o.position_m[1]*1e6:.2f}", f"{o.strength:.3f}",
-                f"{gains.get(o.source_id, 0):.4f}", f"{math.degrees(o.orientation_rad):.1f}"))
+                f"{gains.get(o.source_id, 0):.4f}", f"{math.degrees(o.orientation_rad):.1f}",
+                ('圈内' if attention.contains(o) else '圈外') + (' / 已选入' if gains.get(o.source_id, 0) > 0 else ' / 未选入')))
         self._tick_id = self.window.after(33, self._tick)
 
     def export_diagnostics(self):
