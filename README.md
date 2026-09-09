@@ -10,7 +10,7 @@ P3d 已加入持续运行、真实成对开销基准与故障恢复测试。首�
 
 实时活动可勾选“关注区优先计算”，或增加 `--focus-compute`：前景即时分析、背景低频刷新。1500×500 CDW 存档帧上，约 4.7% 计算区域的前景中位约 31 ms；全帧读取、大圈计算和频带内存仍有限制。完整分项、采样优化与实际窗口/音频短测见 [关注区与全链路成本](docs/p3d-attention-validation.md)。
 
-最新 CDW 平均节奏持续复测中，127 帧全部观察到，未出现 stale；四种关注场景的发布到控制生效 p95 约 126–461 ms，尚未全面通过 100 ms 目标。本批去除了按 256 MiB 上限读取小掩膜的开销，并优化桥接、ROI 复用和聚合等待，见 [接入优化与复测](docs/p3d-ingest-validation.md)；此前基线见 [持续输入验收](docs/p3d-continuous-validation.md)。
+最新 CDW 平均节奏持续复测中，127 帧全部观察到，未出现 stale；活动核改为逐行计算，保留逐体元 XYZ 角变化。四种关注场景的发布到控制生效 p95 约 140–265 ms，大圈拖动从上批 461 ms 降到 254 ms，尚未全面通过 100 ms 目标，见 [活动核优化与复测](docs/p3d-activity-validation.md)。此前结果见 [接入优化](docs/p3d-ingest-validation.md)及 [持续输入验收](docs/p3d-continuous-validation.md)。
 
 ```powershell
 python launch.py --backend-info

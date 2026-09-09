@@ -97,28 +97,23 @@ def angular_activity(
     if threshold is not None and dt_s > threshold * (1.0 + _DT_REL_TOLERANCE):
         return _unavailable(shape, "warming_up", "physical time interval exceeds max_dt_s", dt_s=dt_s)
 
-    prior_u, prior_usable = _normalized(previous.vectors, previous.mask)
-    current_u, current_usable = _normalized(current.vectors, current.mask)
-    valid = prior_usable & current_usable
     rate = np.full(shape, np.nan, dtype=float)
+    valid = np.zeros(shape, dtype=bool)
     warnings: list[str] = []
-    if np.any(current.mask & ~valid):
+    excluded_samples, overflowed_rates, large_step = _angular_rates_by_row(
+        previous.vectors,
+        current.vectors,
+        current.mask,
+        dt_s,
+        rate,
+        valid,
+    )
+    if excluded_samples:
         warnings.append("non-finite or zero-magnitude material sites excluded")
-
-    if np.any(valid):
-        dot = np.sum(prior_u[valid] * current_u[valid], axis=-1)
-        cross_norm = np.linalg.norm(np.cross(prior_u[valid], current_u[valid]), axis=-1)
-        angle = np.arctan2(cross_norm, np.clip(dot, -1.0, 1.0))
-        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
-            local_rate = angle / dt_s
-        finite_rate = np.isfinite(local_rate)
-        valid_indices = np.flatnonzero(valid)
-        rate.flat[valid_indices[finite_rate]] = local_rate[finite_rate]
-        valid.flat[valid_indices[~finite_rate]] = False
-        if np.any(~finite_rate):
-            warnings.append("non-finite angular rates excluded")
-        if np.any(angle[finite_rate] >= _LARGE_STEP_RAD):
-            warnings.append("large angular step approaches the pi aliasing limit")
+    if overflowed_rates:
+        warnings.append("non-finite angular rates excluded")
+    if large_step:
+        warnings.append("large angular step approaches the pi aliasing limit")
 
     material_count = int(np.count_nonzero(current.mask))
     coverage = float(np.count_nonzero(valid) / material_count)
@@ -155,18 +150,82 @@ def _same_geometry(previous: FieldFrame, current: FieldFrame) -> bool:
     )
 
 
-def _normalized(vectors: np.ndarray, material: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Normalize finite vectors after scaling to avoid overflow in their norm."""
+def _angular_rates_by_row(
+    previous: np.ndarray,
+    current: np.ndarray,
+    material: np.ndarray,
+    dt_s: float,
+    rate: np.ndarray,
+    valid: np.ndarray,
+) -> tuple[bool, bool, bool]:
+    """Fill activity outputs one row at a time without normalizing full fields.
 
-    finite = np.all(np.isfinite(vectors), axis=-1)
-    safe = np.where(finite[..., None], vectors, 0.0)
-    scale = np.max(np.abs(safe), axis=-1)
-    scaled = np.divide(safe, scale[..., None], out=np.zeros_like(safe), where=scale[..., None] > 0.0)
-    scaled_norm = np.linalg.norm(scaled, axis=-1)
-    usable = material & finite & (scale > 0.0) & np.isfinite(scaled_norm) & (scaled_norm > 0.0)
-    normalized = np.zeros_like(safe)
-    normalized[usable] = scaled[usable] / scaled_norm[usable, None]
-    return normalized, usable
+    Scaling each finite vector by its largest absolute component makes all
+    intermediate products bounded.  The omitted vector-norm product is the
+    same positive factor in both the cross magnitude and dot product, so it
+    cancels exactly in ``atan2``.
+    """
+
+    excluded_samples = False
+    overflowed_rates = False
+    large_step = False
+    for row_index in range(material.shape[0]):
+        prior_row = previous[row_index]
+        current_row = current[row_index]
+        material_row = material[row_index]
+
+        prior_finite = np.all(np.isfinite(prior_row), axis=-1)
+        current_finite = np.all(np.isfinite(current_row), axis=-1)
+        prior_scale = np.max(np.abs(prior_row), axis=-1)
+        current_scale = np.max(np.abs(current_row), axis=-1)
+        usable = (
+            material_row
+            & prior_finite
+            & current_finite
+            & (prior_scale > 0.0)
+            & (current_scale > 0.0)
+        )
+        if np.any(material_row & ~usable):
+            excluded_samples = True
+        if not np.any(usable):
+            continue
+
+        prior_scaled = np.zeros_like(prior_row, dtype=float)
+        current_scaled = np.zeros_like(current_row, dtype=float)
+        np.divide(
+            prior_row,
+            prior_scale[:, None],
+            out=prior_scaled,
+            where=prior_finite[:, None] & (prior_scale[:, None] > 0.0),
+        )
+        np.divide(
+            current_row,
+            current_scale[:, None],
+            out=current_scaled,
+            where=current_finite[:, None] & (current_scale[:, None] > 0.0),
+        )
+
+        dot = (
+            prior_scaled[:, 0] * current_scaled[:, 0]
+            + prior_scaled[:, 1] * current_scaled[:, 1]
+            + prior_scaled[:, 2] * current_scaled[:, 2]
+        )
+        cross_x = prior_scaled[:, 1] * current_scaled[:, 2] - prior_scaled[:, 2] * current_scaled[:, 1]
+        cross_y = prior_scaled[:, 2] * current_scaled[:, 0] - prior_scaled[:, 0] * current_scaled[:, 2]
+        cross_z = prior_scaled[:, 0] * current_scaled[:, 1] - prior_scaled[:, 1] * current_scaled[:, 0]
+        cross_norm = np.sqrt(cross_x * cross_x + cross_y * cross_y + cross_z * cross_z)
+        angle = np.arctan2(cross_norm, dot)
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            local_rate = angle / dt_s
+        finite_rate = np.isfinite(local_rate)
+        row_valid = usable & finite_rate
+        np.copyto(rate[row_index], local_rate, where=row_valid)
+        valid[row_index] = row_valid
+        if np.any(usable & ~finite_rate):
+            overflowed_rates = True
+        if np.any(row_valid & (angle >= _LARGE_STEP_RAD)):
+            large_step = True
+    return excluded_samples, overflowed_rates, large_step
 
 
 def _unavailable(
