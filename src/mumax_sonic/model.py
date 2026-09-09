@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from math import isfinite
 
 VALIDITIES = {"valid", "invalid", "stale", "warming_up", "unsupported"}
+MAX_SOURCE_BUDGET = 16  # common mapping/native pool ceiling; not a voxel limit
 
 
 @dataclass(frozen=True)

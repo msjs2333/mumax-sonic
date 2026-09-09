@@ -27,6 +27,8 @@ def observe_field(frame, recipe='topology', *, method='solid_angle', boundary='o
                   history=None, band_config=None):
     observations = []
     validity_override = None
+    input_positive = input_negative = 0.0
+    aggregation_basis = 'observer contributions before fixed 4x4 spatial tiles'
     if recipe == 'topology':
         result = topology(frame.vectors, frame.dx_m, frame.dy_m, mask=frame.mask,
                           method=method, boundary=boundary)
@@ -42,6 +44,7 @@ def observe_field(frame, recipe='topology', *, method='solid_angle', boundary='o
                 observations.append(Observation(f'q:{tile}:{sign:+d}', position, total, sign,
                                                 entity_id=frame.entity_id, quantity=f'Q_tile_{method}', unit='1'))
         coverage = result.coverage
+        input_positive, input_negative = result.q_pos, result.q_neg
         summary = f'Q+ {result.q_pos:.4f}  Q− {result.q_neg:.4f}  Qnet {result.q_net:.4f}  Qabs {result.q_abs:.4f}'
         diagnostic = dict(recipe=recipe, method=method, boundary=boundary, surface='+z',
                           q_pos=result.q_pos, q_neg=result.q_neg, q_net=result.q_net,
@@ -49,6 +52,8 @@ def observe_field(frame, recipe='topology', *, method='solid_angle', boundary='o
     elif recipe == 'direction':
         result = direction_angle(frame.vectors, domain_axis, reference_axis, mask=frame.mask)
         ny, nx = frame.vectors.shape[:2]
+        input_positive = float(np.sum(np.where(result.valid, np.sum(result.projection**2, axis=-1), 0)))/(ny*nx)
+        aggregation_basis = 'valid transverse projection weight before circular tile reduction; not all texture content'
         x, y = np.meshgrid(np.arange(nx)*frame.dx_m+frame.origin_m[0],
                            np.arange(ny)*frame.dy_m+frame.origin_m[1])
         # Transverse projection highlights a declared antiparallel-domain core.
@@ -74,6 +79,7 @@ def observe_field(frame, recipe='topology', *, method='solid_angle', boundary='o
         from .observers.activity import angular_activity
         result = angular_activity(previous, frame, max_dt_s=max_dt_s)
         coverage = result.coverage
+        input_positive = result.mean_rad_s
         validity_override = result.validity
         ny, nx = frame.vectors.shape[:2]
         x, y = np.meshgrid(np.arange(nx)*frame.dx_m+frame.origin_m[0],
@@ -104,6 +110,7 @@ def observe_field(frame, recipe='topology', *, method='solid_angle', boundary='o
             raise ValueError('band history must end at the observed frame')
         result = band_power(history, config)
         coverage, validity_override = result.coverage, result.validity
+        input_positive = result.mean_power
         ny, nx = frame.vectors.shape[:2]
         x, y = np.meshgrid(np.arange(nx)*frame.dx_m+frame.origin_m[0],
                            np.arange(ny)*frame.dy_m+frame.origin_m[1])
@@ -133,6 +140,15 @@ def observe_field(frame, recipe='topology', *, method='solid_angle', boundary='o
     validity = validity_override or ('valid' if coverage == 1 else 'invalid')
     sample = Sample(frame.sim_time_s, tuple(observations), frame.sequence, frame.segment_id,
                     validity, coverage, frame.source_kind, time_kind=frame.time_kind)
+    aggregation = {}
+    for label, sign, before in (('positive', 1, input_positive), ('negative', -1, input_negative),
+                                ('absolute', None, input_positive+input_negative)):
+        represented = sum(o.strength for o in observations if sign is None or o.sign == sign)
+        usable = validity == 'valid' and coverage == 1
+        aggregation[label] = dict(input=before if usable else None,
+            represented=represented if usable else None,
+            omitted=max(0.0, before-represented) if usable else None)
+    diagnostic['spatial_aggregation'] = dict(method='fixed_4x4', basis=aggregation_basis, channels=aggregation)
     diagnostic.update(source_kind=frame.source_kind, entity_id=frame.entity_id, provenance=frame.provenance,
                       shape=list(frame.vectors.shape), dx_m=frame.dx_m, dy_m=frame.dy_m,
                       origin_m=list(frame.origin_m), sim_time_s=frame.sim_time_s)
@@ -145,3 +161,17 @@ def observe_field(frame, recipe='topology', *, method='solid_angle', boundary='o
         except (ValueError, TypeError):
             pass  # arbitrary legacy provenance remains available as text
     return FieldView(frame, sample, summary, diagnostic)
+
+
+def field_selection_report(view, report):
+    """Relate candidate coverage to the separately measured pre-tile quantity."""
+    result = dict(report)
+    aggregation = view.diagnostic['spatial_aggregation']
+    result['spatial_aggregation'] = aggregation
+    fractions = {}
+    for channel, values in aggregation['channels'].items():
+        before = values['input']
+        selected = sum(g[channel]['selected'] or 0.0 for g in report['groups'])
+        fractions[channel] = min(1.0, max(0.0, selected/before)) if before is not None and before > 0 else None
+    result['selected_fraction_observer_input'] = fractions
+    return result

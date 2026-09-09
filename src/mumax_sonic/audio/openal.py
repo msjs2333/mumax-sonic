@@ -17,7 +17,7 @@ from math import cos, sin, sqrt, tau
 from pathlib import Path
 from typing import Any
 
-from mumax_sonic.model import SonicScene
+from mumax_sonic.model import MAX_SOURCE_BUDGET, SonicScene
 
 
 # Core OpenAL / ALC values.  They are kept here to avoid a Python binding.
@@ -49,7 +49,7 @@ ALC_HRTF_SOFT = 0x1992
 ALC_HRTF_STATUS_SOFT = 0x1993
 
 _SAMPLE_RATE = 48_000
-_MAX_SOURCES = 16
+_MAX_SOURCES = MAX_SOURCE_BUDGET
 _SCENE_STALE_S = 0.75
 _CONTROL_PERIOD_S = 0.01
 _SMOOTH_TAU_S = 0.045
@@ -281,6 +281,8 @@ class AudioEngine:
             "requested_device": None, "vendor": None, "version": None, "hrtf_requested": False, "hrtf_status": "unknown",
             "connected": None, "orientation_mapping": "optional periodic pitch/tremolo; P1 labels unchanged",
             "last_error": None, "unexpected_stopped_sources": 0,
+            "source_capacity": MAX_SOURCE_BUDGET, "active_source_count": 0,
+            "target_source_count": 0,
             "control_apply_latency_ms": None, "control_apply_latency_p95_ms": None,
             "dropped_updates": 0, "scene_age_ms": None, "scene_validity": None,
             "data_state": "no_scene", "data_message": None,
@@ -381,6 +383,9 @@ class AudioEngine:
         context: Any = None
         buffers: dict[int, int] = {}
         sources: dict[str, _LiveSource] = {}
+        # Active counts allocated OpenAL voices, including voices fading after
+        # they leave the latest scene. Target counts the latest desired scene.
+        target_source_count = 0
         latency_samples: deque[float] = deque(maxlen=128)
         last_tick = time.monotonic()
         try:
@@ -452,7 +457,11 @@ class AudioEngine:
                         live.started = False
                     with self._lock:
                         self._stop_requested = False
-                    self._set_diagnostic(data_state="stopped", data_message=None)
+                    target_source_count = 0
+                    self._set_diagnostic(
+                        active_source_count=len(sources), target_source_count=0,
+                        data_state="stopped", data_message=None,
+                    )
                     continue
                 if "ALC_EXT_disconnect" in device_extensions:
                     connected = ctypes.c_int(1)
@@ -476,14 +485,17 @@ class AudioEngine:
                             live.gain = 0.0
                             live.target_gain = 0.0
                             live.started = False
+                        target_source_count = 0
                         self._set_diagnostic(scene_validity="stale", data_state="stale", data_message="scene is stale; sources muted")
                     elif scene.validity != "valid":
                         for live in sources.values():
                             live.target_gain = 0.0
+                        target_source_count = 0
                         self._set_diagnostic(scene_validity=scene.validity, data_state=scene.validity,
                                              data_message=f"scene validity is {scene.validity}; sources muted")
                     else:
                         desired = scene.sources[:_MAX_SOURCES]
+                        target_source_count = len(desired)
                         desired_ids = {item.source_id for item in desired}
                         seen = set()
                         for item in desired:
@@ -534,6 +546,7 @@ class AudioEngine:
                             al.alSourcef(live.source, AL_GAIN, 0.0)
                             live.gain = live.target_gain = 0.0
                             live.started = False
+                        target_source_count = 0
                         self._set_diagnostic(scene_validity="stale", data_state="stale",
                                              data_message="no scene update within freshness timeout; sources muted")
                 dt = min(0.10, max(0.0, now - last_tick))
@@ -563,6 +576,7 @@ class AudioEngine:
                         al.alSourceStop(live.source)
                         al.alDeleteSources(1, ctypes.byref(ctypes.c_uint(live.source)))
                         del sources[source_id]
+                self._set_diagnostic(active_source_count=len(sources), target_source_count=target_source_count)
                 if applied_submitted_at is not None:
                     # This ends after alSourcef/alSource3f have submitted the
                     # new controls.  It is not a device-buffer or acoustic latency.
@@ -593,6 +607,7 @@ class AudioEngine:
                 al.alcDestroyContext(context)
             if al is not None and device:
                 al.alcCloseDevice(device)
+            self._set_diagnostic(active_source_count=0, target_source_count=0)
             self._set_diagnostic(state="closed" if self.diagnostics()["state"] != "error" else "error")
             self._closed.set()
             self._ready.set()

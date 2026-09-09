@@ -8,8 +8,9 @@ import tkinter as tk
 from tkinter import ttk, filedialog
 
 from ..attention import Attention
-from ..mapping import map_sample
-from ..model import SonicScene
+from ..mapping import map_sample_with_report
+from ..model import SonicScene, MAX_SOURCE_BUDGET
+from .coverage import selection_summary
 from ..session import Transport
 from ..reporting import report_json
 from ..sources.synthetic import SCENARIOS, make_sample
@@ -58,7 +59,8 @@ def audio_status(diagnostic):
     hrtf = diagnostic.get("hrtf_status", "unknown")
     spatial = "HRTF 已启用" if hrtf in {"enabled", "required", "headphones_detected"} else f"HRTF 未启用 ({hrtf}) · 当前不作空间验收"
     quality = diagnostic.get("data_state", "")
-    return f"{diagnostic.get('device', '音频设备')} · {spatial} · {state} / {quality}"
+    voices = f"目标 {diagnostic.get('target_source_count', 0)} / 占用 {diagnostic.get('active_source_count', 0)} 路"
+    return f"{diagnostic.get('device', '音频设备')} · {spatial} · {state} / {quality} · {voices}"
 
 
 class SonicApp:
@@ -80,6 +82,9 @@ class SonicApp:
         self.center = (0.0, 0.0)
         self.sample = None
         self.scene = SonicScene()
+        self.selection_report = None
+        self.source_budget = tk.IntVar(value=4)
+        self.selection_note = tk.StringVar()
         self._labels = {v: k for k, v in SCENARIOS.items()}
         self._labels.update({v: k for k, v in FIELD_SCENARIOS.items()})
         self.field_view = None
@@ -140,12 +145,12 @@ class SonicApp:
         style.configure("Horizontal.TScale", background=BG)
         style.configure("Treeview", background=PANEL, fieldbackground=PANEL, foreground=TEXT, rowheight=27)
         style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 9, "bold"))
-        shell = ttk.Frame(w, padding=22)
+        shell = ttk.Frame(w, padding=18)
         shell.pack(fill="both", expand=True)
         ttk.Label(shell, text="MuMax-Sonic", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(shell, textvariable=self.subtitle, style="Muted.TLabel").pack(anchor="w", pady=(2, 14))
+        ttk.Label(shell, textvariable=self.subtitle, style="Muted.TLabel").pack(anchor="w", pady=(2, 8))
         toolbar = ttk.Frame(shell)
-        toolbar.pack(fill="x", pady=(0, 12))
+        toolbar.pack(fill="x", pady=(0, 8))
         ttk.Label(toolbar, text="场景").pack(side="left", padx=(0, 8))
         combo = ttk.Combobox(toolbar, textvariable=self.scenario, values=list(self._labels), state="readonly", width=24)
         combo.pack(side="left")
@@ -180,6 +185,8 @@ class SonicApp:
             ttk.Label(band_row, text=label).pack(side='left', padx=(0, 4))
             ttk.Entry(band_row, textvariable=variable, width=width).pack(side='left', padx=(0, 8))
         ttk.Button(band_row, text='应用频带', command=self.apply_band).pack(side='left')
+        ttk.Label(band_row, text='声源上限 / 分摊音量').pack(side='left', padx=(16, 4))
+        ttk.Combobox(band_row, textvariable=self.source_budget, values=list(range(1, MAX_SOURCE_BUDGET+1)), state='readonly', width=4).pack(side='left')
         ttk.Label(shell, textvariable=self.data_note, style='Muted.TLabel', wraplength=1040).pack(anchor='w', pady=(0, 5))
         middle = ttk.Frame(shell)
         middle.pack(fill="both", expand=True)
@@ -194,14 +201,15 @@ class SonicApp:
             ttk.Label(controls, text=label, style="Muted.TLabel").pack(anchor="w")
             ttk.Scale(controls, from_=lo, to=hi, variable=var, length=245).pack(fill="x", pady=(0, 9))
         ttk.Button(controls, text="关注区域回中", command=lambda: setattr(self, "center", (0.0, 0.0))).pack(fill="x", pady=4)
-        ttk.Label(controls, text="正负声部 · 共用强度标尺").pack(anchor="w", pady=(16, 6))
+        ttk.Label(controls, text="正负声部 · 共用强度标尺").pack(anchor="w", pady=(8, 6))
         self.sign_buttons = []
         for value, label in (("both", "同时听正负"), ("positive", "仅正声部 +"), ("negative", "仅负声部 −")):
             button = ttk.Radiobutton(controls, text=label, value=value, variable=self.mode)
             button.pack(anchor="w", pady=3)
             self.sign_buttons.append(button)
-        ttk.Label(controls, textvariable=self.legend, style="Muted.TLabel").pack(anchor="w", pady=12)
+        ttk.Label(controls, textvariable=self.legend, style="Muted.TLabel").pack(anchor="w", pady=6)
         ttk.Label(shell, textvariable=self.summary, style="Muted.TLabel").pack(anchor="w", pady=(9, 5))
+        ttk.Label(shell, textvariable=self.selection_note, style="Muted.TLabel", wraplength=1040).pack(anchor="w", pady=(0, 5))
         columns = ("id", "sign", "xy", "strength", "gain", "angle", "selection")
         self.table = ttk.Treeview(shell, columns=columns, show="headings", height=4, selectmode="none")
         for key, label, width in zip(columns, ("声源", "符号", "位置 / µm", "原始强度", "目标增益", "角标签 / °", "范围 / 输出候选"), (160, 55, 155, 100, 100, 100, 160)):
@@ -503,8 +511,14 @@ class SonicApp:
         unsigned = is_activity or is_band
         for button in self.sign_buttons:
             button.state(['disabled'] if unsigned else ['!disabled'])
-        self.scene = map_sample(self.sample, attention, mode='both' if unsigned else self.mode.get(), master_gain=self.master.get(), audible=self.transport.audible,
+        mapped = map_sample_with_report(self.sample, attention, budget=self.source_budget.get(), mode='both' if unsigned else self.mode.get(), master_gain=self.master.get(), audible=self.transport.audible,
                                 strength_reference=self.activity_reference if is_activity else (self.band_reference if is_band else 1.0))
+        self.scene = mapped.scene
+        self.selection_report = mapped.report
+        if self.field_view:
+            from ..field_pipeline import field_selection_report
+            self.selection_report = field_selection_report(self.field_view, self.selection_report)
+        self.selection_note.set(selection_summary(self.selection_report))
         if self.audio_ready and not self.opening:
             try:
                 self.engine.update(self.scene)
@@ -546,13 +560,13 @@ class SonicApp:
             elif self.field_view.diagnostic['recipe'] == 'direction':
                 self.legend.set('φ：音高 + 起伏速率编码\n强度为横向投影面积权重\n非拓扑符号 · 使用正声部输出')
             else:
-                self.legend.set('绿色 Q+ / 紫色 Q−\n圆为分块贡献，非粒子检测\n主声场最多 4 路 · 固定尺度')
+                self.legend.set(f'绿色 Q+ / 紫色 Q−\n圆为分块贡献，非粒子检测\n最多 {self.source_budget.get()} 路 · 单路增益含 1/预算')
             input_info = self.field_view.diagnostic.get('input', {})
             if input_info.get('format') == 'OVF2':
                 self.subtitle.set(f"OVF · {input_info['origin']} · {self.sample.time_kind} · XYZ 完整分量 · z 层 {input_info['z_index']} · 源帧号 {self.sample.sequence} · 箭头 XY / 蓝橙 ±z")
         else:
             self.subtitle.set('P1 · Synthetic 标签演示 · 未计算物理拓扑荷')
-            self.legend.set('绿色 + / 紫色 −\n位置表示方位，音色表示符号\n主声场最多 4 路 · 虚拟距离固定')
+            self.legend.set(f'绿色 + / 紫色 −\n位置表示方位，音色表示符号\n最多 {self.source_budget.get()} 路 · 单路增益含 1/预算')
         self._draw(attention)
         self.table.delete(*self.table.get_children())
         self.table.heading('strength', text='贡献 / rad/s' if is_activity else ('均方贡献' if is_band else '原始强度'))
@@ -561,7 +575,7 @@ class SonicApp:
             self.table.insert("", "end", values=(o.source_id, '—' if unsigned else ("+" if o.sign > 0 else "−"),
                 f"{o.position_m[0]*1e6:.2f}, {o.position_m[1]*1e6:.2f}", f"{o.strength:.3g}",
                 f"{gains.get(o.source_id, 0):.4f}", f"{math.degrees(o.orientation_rad):.1f}",
-                ('圈内' if attention.contains(o) else '圈外') + (' / 已选入' if gains.get(o.source_id, 0) > 0 else ' / 未选入')))
+                ('圈内' if attention.contains(o) else '圈外') + (' / 已选入' if gains.get(o.source_id, 0) > 0 else ' / 已选但输出静音' if o.source_id in self.selection_report['selected_ids'] else ' / 未选入')))
         self._tick_id = self.window.after(33, self._tick)
 
     def export_diagnostics(self):
@@ -576,7 +590,7 @@ class SonicApp:
                                physical_topology_computed=self.field_view.diagnostic['recipe'] == 'topology',
                                field=self.field_view.diagnostic)
             payload.update(playback_rate=self.transport.playback_rate, activity_reference_rad_s=self.activity_reference,
-                           activity_max_dt_s=self.max_dt_s, band_reference=self.band_reference)
+                           activity_max_dt_s=self.max_dt_s, band_reference=self.band_reference, selection=self.selection_report, source_budget=self.source_budget.get())
             Path(filename).write_text(report_json(payload), encoding="utf-8")
 
     def close(self):
@@ -588,7 +602,7 @@ class SonicApp:
         self.window.destroy()
 
 
-def run(no_audio=False, dll_path=None, field_demo=None, replay_path=None, recipe='topology', max_dt_s=None, activity_reference=1e9, band_config=None, band_reference=0.005):
+def run(no_audio=False, dll_path=None, field_demo=None, replay_path=None, recipe='topology', max_dt_s=None, activity_reference=1e9, band_config=None, band_reference=0.005, source_budget=4):
     configure_dpi()
     root = tk.Tk()
     app = SonicApp(root, no_audio=no_audio, dll_path=dll_path)
@@ -600,6 +614,7 @@ def run(no_audio=False, dll_path=None, field_demo=None, replay_path=None, recipe
         app.band_window.set(str(band_config.window_samples))
         app.band_axis.set(','.join(str(v) for v in band_config.reference_axis))
     app.band_reference = band_reference
+    app.source_budget.set(source_budget)
     app.max_dt_s = max_dt_s
     app.max_dt_ns.set('' if max_dt_s is None else f'{max_dt_s*1e9:g}')
     app.activity_reference = activity_reference

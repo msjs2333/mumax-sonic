@@ -1,7 +1,7 @@
 """Attention acts on listening gain/selection, never on physical observations."""
 from dataclasses import dataclass
 from math import hypot, isfinite
-from .model import Observation
+from .model import MAX_SOURCE_BUDGET, Observation
 
 
 @dataclass(frozen=True)
@@ -44,11 +44,18 @@ def select_sources(observations, attention: Attention, budget: int = 4):
     With at least two slots, both signs in the ROI receive a slot when present.
     IDs break ties so repeated identical input produces the same selection.
     """
-    if budget < 1:
-        raise ValueError("source budget must be positive")
-    ranked = sorted(observations, key=lambda o: (-o.strength * attention.weight(o), o.source_id))
+    if type(budget) is not int or not 1 <= budget <= MAX_SOURCE_BUDGET:
+        raise ValueError(f"source budget must be an integer in [1, {MAX_SOURCE_BUDGET}]")
+    # A silent candidate cannot use a voice slot.  Keeping this here as well as
+    # in mapping makes direct callers of the selector obey the same contract.
+    audible = [o for o in observations if o.strength > 0 and attention.weight(o) > 0]
+    ranked = sorted(audible, key=lambda o: (-o.strength * attention.weight(o), o.source_id))
     inside = [o for o in ranked if attention.contains(o)]
     outside = [o for o in ranked if not attention.contains(o)]
+    # There is no room to reserve both signs with one voice.  Prefer the best
+    # audible ROI candidate regardless of sign, falling back to the overview.
+    if budget == 1:
+        return tuple((inside or outside)[:1])
     selected = []
     for sign in (1, -1):
         matching = [o for o in inside if o.sign == sign]

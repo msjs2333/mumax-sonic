@@ -35,8 +35,7 @@ def test_quality_failure_and_valid_zero_are_distinct():
     zero_scene = map_sample(zero, Attention())
     assert stale.validity == "stale" and invalid.validity == "invalid"
     assert not stale.sources and not invalid.sources
-    assert zero_scene.validity == "valid" and len(zero_scene.sources) == 1
-    assert zero_scene.sources[0].gain == 0
+    assert zero_scene.validity == "valid" and not zero_scene.sources
 
 
 def test_pause_freezes_time_but_static_listen_remains_audible():

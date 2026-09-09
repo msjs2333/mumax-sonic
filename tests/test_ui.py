@@ -205,3 +205,25 @@ def test_ovf_manifest_window_load_and_navigation(app, tmp_path, monkeypatch):
     app.step_frame(1)
     app._tick()
     assert app.sample.validity == 'warming_up' and not app.scene.sources
+
+
+def test_budget_changes_selection_not_physics_and_pause_keeps_report(app):
+    from mumax_sonic.ui.app import FIELD_SCENARIOS
+    app.scenario.set(FIELD_SCENARIOS['field:activity_rotation'])
+    app.seek_to(1e-9)
+    app.source_budget.set(4)
+    app._tick()
+    before=app.field_view.diagnostic.copy()
+    assert len(app.selection_report['selected_ids'])==4
+    app.source_budget.set(16)
+    app._tick()
+    assert app.field_view.diagnostic==before
+    assert len(app.scene.sources)==16
+    assert app.selection_report['selected_fraction_observer_input']['absolute']==pytest.approx(1)
+    selected=app.selection_report['groups']
+    app.static.set(False)
+    app._tick()
+    assert not app.scene.sources
+    assert app.selection_report['groups'][0]['absolute']['selected']==selected[0]['absolute']['selected']
+    assert app.selection_report['groups'][0]['absolute']['output']==0
+    assert '非零输出候选 0 路' in app.selection_note.get()

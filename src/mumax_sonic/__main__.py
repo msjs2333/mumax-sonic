@@ -27,6 +27,8 @@ def main():
     parser.add_argument('--band-window', type=int, default=256)
     parser.add_argument('--band-axis', type=float, nargs=3, default=(0, 0, 1))
     parser.add_argument('--band-reference', type=float, default=0.005)
+    from .model import MAX_SOURCE_BUDGET
+    parser.add_argument('--source-budget', type=int, default=4, choices=range(1, MAX_SOURCE_BUDGET+1), help='Maximum spatial voices; default 4, gain headroom uses 1/budget')
     args = parser.parse_args()
     band_config = None
     if args.recipe == 'band' or (args.field_demo and args.field_demo.startswith('band_')) or not (args.doctor or args.audio_smoke is not None):
@@ -50,9 +52,20 @@ def main():
         from .sources.ovf_replay import load_field_replay
         from .field_pipeline import observe_field
         replay = load_field_replay(args.inspect_field)
-        report = {'sha256': replay.sha256, 'frames': [observe_field(f, args.recipe, method=args.method,
-            previous=replay.frames[i-1] if i else None, max_dt_s=max_dt_s, band_config=band_config,
-            history=replay.frames[max(0, i-args.band_window+1):i+1]).diagnostic for i, f in enumerate(replay.frames)]}
+        from .attention import Attention
+        from .mapping import map_sample_with_report
+        from .field_pipeline import field_selection_report
+        reports = []
+        reference = args.activity_reference_rad_s if args.recipe == 'activity' else args.band_reference if args.recipe == 'band' else 1.0
+        for i, frame in enumerate(replay.frames):
+            view = observe_field(frame, args.recipe, method=args.method,
+                previous=replay.frames[i-1] if i else None, max_dt_s=max_dt_s, band_config=band_config,
+                history=replay.frames[max(0,i-args.band_window+1):i+1])
+            attention = Attention(extent_m=frame.extent_m, origin_m=frame.center_m[:2])
+            mapped = map_sample_with_report(view.sample, attention, budget=args.source_budget, strength_reference=reference)
+            reports.append(dict(view.diagnostic, selection=field_selection_report(view,mapped.report)))
+        report = dict(sha256=replay.sha256, frames=reports, source_budget=args.source_budget,
+                      selection_context='default ROI and both signs; preview only, no audio device opened')
         print(report_json(report))
         if args.report:
             args.report.parent.mkdir(parents=True, exist_ok=True)
@@ -60,11 +73,12 @@ def main():
     elif args.doctor or args.audio_smoke is not None:
         from .audio import AudioConfig, AudioEngine, enumerate_devices
         from .attention import Attention
-        from .mapping import map_sample
+        from .mapping import map_sample_with_report
         from .sources.synthetic import make_sample
         engine = AudioEngine()
         report = {"source_kind": "synthetic", "physical_topology_computed": False,
-                  "human_listening_verified": False, "acoustic_latency_measured": False}
+                  "human_listening_verified": False, "acoustic_latency_measured": False,
+                  "peak_active_source_count": 0, "peak_target_source_count": 0}
         try:
             report["devices"] = enumerate_devices(args.dll)
             engine.open(AudioConfig(dll_path=args.dll, device_name=args.device, hrtf=not args.no_hrtf))
@@ -96,7 +110,12 @@ def main():
                         report['activity_reference_rad_s'] = reference
                     else:
                         sample = make_sample("moving", elapsed*1e-9, sequence)
-                    engine.update(map_sample(sample, Attention(background=1), master_gain=0.06, strength_reference=reference))
+                    mapped = map_sample_with_report(sample, Attention(background=1), master_gain=0.06, strength_reference=reference, budget=args.source_budget)
+                    report['selection'] = mapped.report
+                    engine.update(mapped.scene)
+                    counts = engine.diagnostics()
+                    report['peak_active_source_count'] = max(report['peak_active_source_count'], counts['active_source_count'])
+                    report['peak_target_source_count'] = max(report['peak_target_source_count'], counts['target_source_count'])
                     sequence += 1
                     time.sleep(0.025)
                 engine.stop()
@@ -118,7 +137,7 @@ def main():
     else:
         from .ui.app import run
         run(no_audio=args.no_audio, dll_path=args.dll, field_demo=args.field_demo, replay_path=args.replay,
-            recipe=args.recipe, max_dt_s=max_dt_s, activity_reference=args.activity_reference_rad_s, band_config=band_config, band_reference=args.band_reference)
+            recipe=args.recipe, max_dt_s=max_dt_s, activity_reference=args.activity_reference_rad_s, band_config=band_config, band_reference=args.band_reference, source_budget=args.source_budget)
 
 
 if __name__ == "__main__":
