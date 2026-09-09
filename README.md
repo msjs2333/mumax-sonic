@@ -9,7 +9,7 @@ python launch.py --field-demo opposite_pair --aggregation adaptive --source-budg
 python launch.py --field-demo activity_localized --aggregation adaptive --source-budget 8
 ```
 
-窗口“空间聚合”中 `fixed` 为固定分块，`adaptive` 为关注区细分和背景汇总。虚线声源表示背景汇总；100% 贡献覆盖不表示空间细节完整保留。连续取向目前回退固定分块。
+窗口“空间聚合”中 `fixed` 为固定分块，`adaptive` 为关注区细分和背景汇总。虚线声源表示背景汇总；100% 贡献覆盖不表示空间细节完整保留。连续取向目前回退固定分块。自适应声音在分区变化时复用邻近同声部的播放循环，并采用 120 ms 时间常数平滑位置与增益，减少拖动重新起音；暂停探听的重聚合在后台运行。
 
 ## 调整声源与查看覆盖
 

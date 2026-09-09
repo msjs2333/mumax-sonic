@@ -229,14 +229,27 @@ def test_budget_changes_selection_not_physics_and_pause_keeps_report(app):
     assert '非零输出候选 0 路' in app.selection_note.get()
 
 
+def _await_aggregation(app):
+    import time
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        app._tick()
+        if app._aggregation_key is not None and app._aggregation_key[1].center == app.center:
+            return
+        time.sleep(.01)
+    pytest.fail('aggregation did not complete')
+
+
 def test_adaptive_roi_reuses_physics_and_regroups(app):
     from mumax_sonic.ui.app import FIELD_SCENARIOS
     app.scenario.set(FIELD_SCENARIOS['field:opposite_pair'])
     app.aggregation_mode.set('adaptive')
     app._tick()
+    _await_aggregation(app)
     before = app.field_view
     app.center = (.3, -.2)
     app._tick()
+    _await_aggregation(app)
     after = app.field_view
     assert after.contributions is before.contributions
     assert after.diagnostic['q_abs'] == before.diagnostic['q_abs']
@@ -246,3 +259,35 @@ def test_adaptive_roi_reuses_physics_and_regroups(app):
     app._tick()
     assert app.field_view is after
     assert '空间 RMS' in app.selection_note.get()
+
+
+def test_slow_aggregation_does_not_block_roi_or_apply_old_scene(app, monkeypatch):
+    from threading import Event
+    from mumax_sonic.ui.app import FIELD_SCENARIOS
+    from mumax_sonic.ui import aggregation_worker
+    entered, release = Event(), Event()
+    original = aggregation_worker.apply_aggregation
+    def slow(*args, **kwargs):
+        entered.set()
+        assert release.wait(2)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(aggregation_worker, 'apply_aggregation', slow)
+    app.scenario.set(FIELD_SCENARIOS['field:opposite_pair'])
+    app.aggregation_mode.set('adaptive')
+    app.source_budget.set(8)
+    try:
+        app._tick()
+        assert entered.wait(1)
+        app.center = (.4, -.2)
+        app._tick()  # must return while the background job is blocked
+        assert not release.is_set()
+        assert app.sample.validity == 'warming_up'
+        assert not app.scene.sources
+        assert '空间聚合更新中' in app.data_note.get()
+        app.scenario.set(SCENARIOS['invalid'])
+        app._tick()
+        assert app.sample.validity == 'invalid'
+    finally:
+        release.set()
+    app._tick()
+    assert app.sample.validity == 'invalid'

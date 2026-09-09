@@ -13,7 +13,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from math import cos, sin, sqrt, tau
+from math import cos, sin, sqrt, tau, exp
 from pathlib import Path
 from typing import Any
 
@@ -282,6 +282,8 @@ class AudioEngine:
             "connected": None, "orientation_mapping": "optional periodic pitch/tremolo; P1 labels unchanged",
             "last_error": None, "unexpected_stopped_sources": 0,
             "source_capacity": MAX_SOURCE_BUDGET, "active_source_count": 0,
+            "adaptive_voice_matching": "nearest within sign and foreground/background role",
+            "adaptive_smoothing_tau_ms": 120,
             "target_source_count": 0,
             "control_apply_latency_ms": None, "control_apply_latency_p95_ms": None,
             "dropped_updates": 0, "scene_age_ms": None, "scene_validity": None,
@@ -383,6 +385,8 @@ class AudioEngine:
         context: Any = None
         buffers: dict[int, int] = {}
         sources: dict[str, _LiveSource] = {}
+        from .continuity import AdaptiveVoiceTracker
+        adaptive_voices = AdaptiveVoiceTracker()
         # Active counts allocated OpenAL voices, including voices fading after
         # they leave the latest scene. Target counts the latest desired scene.
         target_source_count = 0
@@ -474,6 +478,7 @@ class AudioEngine:
                         continue
                 if pending is not None:
                     scene, submitted, _sequence = pending
+                    scene = adaptive_voices.map(scene)
                     age = now - submitted
                     if scene.validity == "stale" or age > _SCENE_STALE_S:
                         for live in sources.values():
@@ -553,8 +558,11 @@ class AudioEngine:
                 last_tick = now
                 alpha = 1.0 if dt == 0 else min(1.0, dt / _SMOOTH_TAU_S)
                 for source_id, live in list(sources.items()):
-                    live.gain += (live.target_gain - live.gain) * alpha
-                    live.position = tuple(current + (target - current) * alpha for current, target in zip(live.position, live.target_position))
+                    # Spatial partitions may change abruptly as attention moves.
+                    # Keep their renderer voices alive and soften the retargeting.
+                    spatial_alpha = 1 - exp(-dt / 0.12) if source_id.startswith('sonic-adaptive:') else alpha
+                    live.gain += (live.target_gain - live.gain) * spatial_alpha
+                    live.position = tuple(current + (target - current) * spatial_alpha for current, target in zip(live.position, live.target_position))
                     pitch, rate = orientation_controls(live.orientation_rad) if live.orientation_enabled else (1.0, 4.0)
                     live.pitch += (pitch-live.pitch)*alpha
                     live.modulation_hz += (rate-live.modulation_hz)*alpha

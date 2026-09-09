@@ -87,6 +87,9 @@ class SonicApp:
         self.aggregation_mode = tk.StringVar(value='fixed')
         self._aggregation_key = None
         self._aggregation_view = None
+        from .aggregation_worker import LatestAggregation
+        self._aggregation_worker = LatestAggregation()
+        self._aggregation_base = None
         self.selection_note = tk.StringVar()
         self._labels = {v: k for k, v in SCENARIOS.items()}
         self._labels.update({v: k for k, v in FIELD_SCENARIOS.items()})
@@ -518,14 +521,37 @@ class SonicApp:
         field = self.field_view.field if self.field_view else None
         attention = Attention(self.center, self.radius.get(), self.background.get(),
                               field.extent_m if field else 1e-6, field.center_m[:2] if field else (0, 0))
+        draw_attention = attention
+        aggregation_pending = False
         if self.field_view is not None:
             from ..field_pipeline import apply_aggregation
             key = (id(self.field_view), attention, self.source_budget.get(), self.aggregation_mode.get())
-            if key != self._aggregation_key:
-                self._aggregation_base = self.field_view  # retain identity until cache replacement
-                self._aggregation_view = apply_aggregation(self.field_view, attention, self.source_budget.get(), self.aggregation_mode.get())
-                self._aggregation_key = key
-            self.field_view = self._aggregation_view
+            base = self.field_view
+            adaptive = (self.aggregation_mode.get() == 'adaptive' and base.contributions is not None
+                        and base.sample.validity == 'valid' and base.sample.coverage == 1
+                        and not self.transport.playing)
+            if adaptive:
+                self._aggregation_worker.request(key, base, attention, self.source_budget.get())
+                completed = self._aggregation_worker.poll()
+                if completed is not None:
+                    done_key, done_view, error = completed
+                    if done_key[0] == id(base) and done_key[2:] == key[2:]:
+                        if error is None:
+                            self._aggregation_base = base
+                            self._aggregation_key, self._aggregation_view = done_key, done_view
+                        else:
+                            self.status.set(f'空间聚合失败：{error}')
+                compatible = (self._aggregation_base is base and self._aggregation_key is not None
+                              and self._aggregation_key[2:] == key[2:])
+                if compatible:
+                    self.field_view = self._aggregation_view
+                    attention = self._aggregation_key[1]
+                else:
+                    from dataclasses import replace
+                    self.field_view = replace(base, sample=replace(base.sample, observations=(), validity='warming_up'))
+                aggregation_pending = self._aggregation_key != key
+            else:
+                self.field_view = apply_aggregation(base, attention, self.source_budget.get(), self.aggregation_mode.get())
             self.sample = self.field_view.sample
         is_activity = self.field_view is not None and self.field_view.diagnostic['recipe'] == 'activity'
         is_band = self.field_view is not None and self.field_view.diagnostic['recipe'] == 'band'
@@ -588,7 +614,9 @@ class SonicApp:
         else:
             self.subtitle.set('P1 · Synthetic 标签演示 · 未计算物理拓扑荷')
             self.legend.set(f'绿色 + / 紫色 −\n位置表示方位，音色表示符号\n最多 {self.source_budget.get()} 路 · 单路增益含 1/预算')
-        self._draw(attention)
+        if aggregation_pending:
+            self.data_note.set(self.data_note.get() + ' · 空间聚合更新中，声音使用上次完成的关注区域')
+        self._draw(draw_attention)
         self.table.delete(*self.table.get_children())
         self.table.heading('strength', text='贡献 / rad/s' if is_activity else ('均方贡献' if is_band else '原始强度'))
         gains = {s.source_id: s.gain for s in self.scene.sources}
@@ -596,7 +624,7 @@ class SonicApp:
             self.table.insert("", "end", values=(o.source_id, '—' if unsigned else ("+" if o.sign > 0 else "−"),
                 f"{o.position_m[0]*1e6:.2f}, {o.position_m[1]*1e6:.2f}", f"{o.strength:.3g}",
                 f"{gains.get(o.source_id, 0):.4f}", f"{math.degrees(o.orientation_rad):.1f}",
-                ('圈内' if attention.contains(o) else '圈外') + (' / 已选入' if gains.get(o.source_id, 0) > 0 else ' / 已选但输出静音' if o.source_id in self.selection_report['selected_ids'] else ' / 未选入')))
+                ('圈内' if draw_attention.contains(o) else '圈外') + (' / 已选入' if gains.get(o.source_id, 0) > 0 else ' / 已选但输出静音' if o.source_id in self.selection_report['selected_ids'] else ' / 未选入')))
         self._tick_id = self.window.after(33, self._tick)
 
     def export_diagnostics(self):
@@ -616,6 +644,7 @@ class SonicApp:
 
     def close(self):
         self.closing = True
+        self._aggregation_worker.close()
         if self._tick_id:
             self.window.after_cancel(self._tick_id)
         if self.engine and not self.opening:
