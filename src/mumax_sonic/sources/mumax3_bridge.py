@@ -7,12 +7,13 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import time
 from typing import Any
 from types import SimpleNamespace
 
 import numpy as np
 
-from .ovf import read_ovf
+from .ovf import probe_ovf, read_ovf
 
 
 MAX_FRAMES = 4096
@@ -57,7 +58,7 @@ class MuMax3Bridge:
 
     def __init__(self, directory, manifest_path, *, entity_id, segment_id,
                  time_kind="dynamics", origin="simulation", all_material=False,
-                 mask_path=None, z_index=None, pattern="m*.ovf"):
+                 mask_path=None, z_index=None, pattern="m[0-9]*.ovf"):
         self.directory = Path(directory).resolve()
         self.manifest_path = Path(manifest_path).resolve()
         if self.manifest_path.is_relative_to(self.directory):
@@ -139,7 +140,10 @@ class MuMax3Bridge:
         if cached and cached[:2] == signature:
             return cached[2]
         try:
-            field = read_ovf(path, hash_content=False)
+            # Binary MuMax output is validated from its header, check value,
+            # declared payload extent, and trailers.  It avoids decoding a
+            # transient full magnetization array on every poll.
+            field = probe_ovf(path)
         except ValueError as exc:
             with path.open('rb') as stream:
                 stream.seek(max(0, stat.st_size-256))
@@ -154,13 +158,13 @@ class MuMax3Bridge:
             raise ValueError("missing physical time in OVF header")
         if not math.isfinite(field.time_s) or field.time_s < 0:
             raise ValueError("physical time must be finite and nonnegative")
-        if self.z_index is None and field.vectors.shape[0] != 1:
+        if self.z_index is None and field.shape[0] != 1:
             raise ValueError("multilayer OVF requires explicit z_index")
-        if self.z_index is not None and self.z_index >= field.vectors.shape[0]:
+        if self.z_index is not None and self.z_index >= field.shape[0]:
             raise ValueError("z_index outside OVF mesh")
-        if self._mask_shape is not None and tuple(self._mask_shape) not in (field.vectors.shape[:3], field.vectors.shape[1:3]):
+        if self._mask_shape is not None and tuple(self._mask_shape) not in (field.shape[:3], field.shape[1:3]):
             raise ValueError('material mask shape does not match OVF mesh')
-        geometry = (field.vectors.shape, tuple(field.step_m), tuple(field.origin_m), tuple(field.labels))
+        geometry = (field.shape, tuple(field.step_m), tuple(field.origin_m), tuple(field.labels))
         unit = field.units[0]
         if self._geometry is None:
             self._geometry, self._unit = geometry, unit
@@ -191,15 +195,26 @@ class MuMax3Bridge:
         fd, name = tempfile.mkstemp(prefix=".mumax3-manifest-", suffix=".tmp", dir=self.manifest_path.parent)
         try:
             with os.fdopen(fd, "wb") as stream:
-                stream.write(raw); stream.flush(); os.fsync(stream.fileno())
+                stream.write(raw)
             if not self._manifest_created:
                 try:
                     os.link(name, self.manifest_path)
                 except FileExistsError:
                     raise FileExistsError("manifest appeared during publication")
             else:
-                os.replace(name, self.manifest_path)
+                # Windows virus scanners and readers can briefly hold the old
+                # manifest open.  Retry only a bounded number of times; a
+                # later poll can publish the same accumulated records.
+                for attempt in range(3):
+                    try:
+                        os.replace(name, self.manifest_path)
+                        break
+                    except PermissionError:
+                        if attempt == 2:
+                            return False
+                        time.sleep(0.01 * (attempt + 1))
             self._manifest_created = True
+            return True
         finally:
             try: os.unlink(name)
             except FileNotFoundError: pass
@@ -243,7 +258,8 @@ class MuMax3Bridge:
             if not records:
                 return {"state": "waiting", "reason": "awaiting complete OVF files", "published_frames": self._published_count, "pending_files": pending}
             if len(records) > self._published_count:
-                self._publish(self._manifest(records))
+                if self._publish(self._manifest(records)) is False:
+                    return {"state": "waiting", "reason": "manifest replace is temporarily busy", "published_frames": self._published_count, "pending_files": []}
                 self._published_count = len(records)
                 self._published = {p: True for _, p, _ in records}
             return {"state": "waiting" if pending else "current", "reason": "awaiting next complete frame" if pending else None, "published_frames": self._published_count, "pending_files": pending}

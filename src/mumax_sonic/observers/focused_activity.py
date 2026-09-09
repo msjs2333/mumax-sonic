@@ -82,6 +82,8 @@ class FocusedActivity:
         self._background_error: str | None = None
         self._closed = False
         self._last_started_s: float | None = None
+        self._foreground_key = None
+        self._foreground_view = None
         self._thread = threading.Thread(target=self._run, name="focused-activity-background", daemon=True)
         self._thread.start()
 
@@ -99,7 +101,7 @@ class FocusedActivity:
                 max_dt_s: float | None = None) -> FieldView:
         """Return a current tile-aligned focus calculation without waiting."""
         if attention is None:
-            attention = Attention(extent_m=current.extent_m, origin_m=current.center_m)
+            attention = Attention(extent_m=current.extent_m, origin_m=current.center_m[:2])
         if min(current.vectors.shape[:2]) < _DIVISIONS:
             # A 16-by-16 overview cannot be represented faithfully on a small
             # field.  Keep the established full-field observer contract.
@@ -116,12 +118,22 @@ class FocusedActivity:
             # inventing padded physical samples.
             return observe_field(current, "activity", previous=previous, max_dt_s=max_dt_s)
         started = time.monotonic()
-        local = observe_field(_crop(current, r0, r1, c0, c1), "activity",
-                              previous=_crop(previous, r0, r1, c0, c1) if previous is not None else None,
-                              max_dt_s=max_dt_s)
+        # Mouse motion within the same aligned tiles changes listening weights,
+        # but not the physical samples needed for this frame pair.
+        foreground_key = (None if previous is None else _key(previous), _key(current), bounds, max_dt_s)
+        cached = foreground_key == self._foreground_key
+        if cached:
+            local = self._foreground_view
+        else:
+            local = observe_field(_crop(current, r0, r1, c0, c1), "activity",
+                                  previous=_crop(previous, r0, r1, c0, c1) if previous is not None else None,
+                                  max_dt_s=max_dt_s)
+            self._foreground_key, self._foreground_view = foreground_key, local
         focus_ms = (time.monotonic() - started) * 1000.0
         self._enqueue(previous, current, max_dt_s)
-        return self._merged(current, local, bounds, focus_ms)
+        view = self._merged(current, local, bounds, focus_ms)
+        view.diagnostic['focus_compute']['foreground_cache_hit'] = cached
+        return view
 
     def _focus_bounds(self, frame: FieldFrame, attention) -> tuple[int, int, int, int] | None:
         ny, nx = frame.vectors.shape[:2]

@@ -22,7 +22,7 @@ class LiveConfig:
     method: str = 'solid_angle'
     max_dt_s: float | None = None
     band_config: object | None = None
-    poll_interval_s: float = .1
+    poll_interval_s: float = .05
     stale_after_s: float = 2.0
 
     def __post_init__(self):
@@ -49,6 +49,7 @@ class LiveFollower:
         self._reader_diagnostics = {}
         self._lock = Lock()
         self._stop = Event()
+        self._wake = Event()
         self._thread: Thread | None = None
         self._view: FieldView | None = None
         self._state = 'waiting'
@@ -66,6 +67,10 @@ class LiveFollower:
         self._last_new_at: float | None = None
         self._waiting_since = time.monotonic()
         self._last_stamp = None
+        self._frames = ()
+        self._records = ()
+        self._job_id = 0
+        self._last_job = None
 
     def start(self):
         with self._lock:
@@ -78,6 +83,7 @@ class LiveFollower:
 
     def close(self):
         self._stop.set()
+        self._wake.set()
         with self._lock:
             self._state = 'closed'
             self._reason = 'closed'
@@ -92,6 +98,7 @@ class LiveFollower:
             if (enabled and attention != self._attention) or enabled != self._focus_enabled:
                 self._attention, self._focus_enabled = attention, enabled
                 self._attention_revision += 1
+                self._wake.set()
 
     def snapshot(self) -> dict:
         """Return the current worker result; this does no I/O or array copies."""
@@ -104,23 +111,33 @@ class LiveFollower:
             return dict(view=self._view, state=state, reason=reason,
                         age_s=age, updates=self._updates, skipped_observation_frames=self._skipped_observation_frames, last_error=self._last_error,
                         processing_ms=self._processing_ms, reader=dict(self._reader_diagnostics),
-                        processing_breakdown_ms=dict(self._processing_breakdown_ms))
+                        processing_breakdown_ms=dict(self._processing_breakdown_ms),
+                        last_job=None if self._last_job is None else dict(
+                            self._last_job, timings_ms=dict(self._last_job['timings_ms'])) )
 
     def _run(self):
         while not self._stop.is_set():
+            self._wake.clear()
             started = time.monotonic()
             try:
                 stamp = self._stamp()
                 if stamp is None:
                     self._publish_waiting(started, 'manifest is missing')
-                elif stamp != self._last_stamp or self._state == 'invalid' or self._attention_revision != self._applied_attention_revision:
-                    self._last_stamp = stamp
-                    self._reload(started)
                 else:
-                    self._refresh_staleness(started)
+                    with self._lock:
+                        changed = stamp != self._last_stamp
+                        invalid = self._state == 'invalid'
+                        attention_changed = self._attention_revision != self._applied_attention_revision
+                        eligible_roi = self._state in ('current', 'stale') and attention_changed and bool(self._frames)
+                    if changed or invalid or eligible_roi:
+                        if changed:
+                            self._last_stamp = stamp
+                        self._reload(started, roi_only=eligible_roi and not changed and not invalid)
+                    else:
+                        self._refresh_staleness(started)
             except Exception as exc:  # unexpected worker errors remain fail-closed
                 self._publish_invalid(started, f'{type(exc).__name__}: {exc}')
-            self._stop.wait(self.config.poll_interval_s)
+            self._wake.wait(self.config.poll_interval_s)
 
     def _stamp(self):
         try:
@@ -129,19 +146,27 @@ class LiveFollower:
             return None
         return (stat.st_mtime_ns, stat.st_size, getattr(stat, 'st_ino', None))
 
-    def _reload(self, started):
+    def _reload(self, started, roi_only=False):
         timings = {}
         stage_started = time.monotonic()
         with self._lock:
             attention, focused, revision = self._attention, self._focus_enabled, self._attention_revision
+            cached_frames, cached_records = self._frames, self._records
+        kind = 'roi' if roi_only else 'manifest'
+        job_sequence = None
         try:
-            replay = self._reader.load(self.path)
+            if roi_only:
+                frames, records = cached_frames, cached_records
+            else:
+                replay = self._reader.load(self.path)
+                frames, records = replay.frames, self._reader.records
+                with self._lock:
+                    self._frames, self._records = frames, records
             timings['read_validate'] = (time.monotonic()-stage_started)*1000
             stage_started = time.monotonic()
-            frames = replay.frames
-            records = self._reader.records
             latest = frames[-1]
-            key = self._key(replay.frames[-1])
+            job_sequence = latest.sequence
+            key = self._key(latest)
             # A re-published manifest with no new physical record only updates
             # metadata; it must not reset the stale timer or recompute physics.
             is_new = self._view is None or key != self._key(self._view.field)
@@ -177,6 +202,10 @@ class LiveFollower:
         finally:
             with self._lock:
                 self._processing_breakdown_ms = timings
+                self._job_id += 1
+                self._last_job = dict(job_id=self._job_id, sequence=job_sequence, kind=kind,
+                                      started_at_s=started, completed_at_s=time.monotonic(),
+                                      timings_ms=dict(timings), state=self._state)
 
     @staticmethod
     def _key(frame):
@@ -196,8 +225,18 @@ class LiveFollower:
                 self._updates += 1
                 self._last_new_at = started  # include read/observer latency in freshness
             self._view = view
-            self._state = 'current' if self._last_new_at is not None else 'waiting'
-            self._reason = 'new physical frame observed' if is_new else 'published manifest has no new physical frame'
+            if is_new:
+                self._state = 'current' if self._last_new_at is not None else 'waiting'
+                self._reason = 'new physical frame observed'
+            elif (self._last_new_at is not None and
+                  now - self._last_new_at >= self.config.stale_after_s):
+                self._state = 'stale'
+                self._reason = 'attention region recomputed; no new physical frame'
+            elif self._state not in ('stale', 'closed'):
+                self._state = 'current' if self._last_new_at is not None else 'waiting'
+                self._reason = 'published manifest has no new physical frame'
+            else:
+                self._reason = 'attention region recomputed; no new physical frame'
             self._last_error = None
             self._processing_ms = (now - started) * 1000.0
 

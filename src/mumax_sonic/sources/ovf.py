@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import hashlib
 from pathlib import Path
 import re
+import struct
 
 import numpy as np
 
@@ -42,6 +43,152 @@ class OVFData:
     byte_count: int = 0
 
 
+@dataclass(frozen=True)
+class OVFProbe:
+    """OVF metadata verified without decoding the vector payload.
+
+    This is for live producers only.  Consumers that need magnetization data
+    must continue to use :func:`read_ovf`.
+    """
+
+    shape: tuple[int, int, int, int]
+    step_m: tuple[float, float, float]
+    origin_m: tuple[float, float, float]
+    time_s: float | None
+    labels: tuple[str, str, str]
+    units: tuple[str, str, str]
+    encoding: str
+    time_hint: tuple[str, ...] = ()
+    byte_count: int = 0
+
+
+def probe_ovf(path) -> OVFProbe:
+    """Verify an OVF header and binary framing without allocating vectors.
+
+    Text payloads intentionally use the established full decoder: their
+    variable-width records cannot be bounded from the header alone.
+    """
+    source = Path(path)
+    try:
+        size = source.stat().st_size
+    except OSError as exc:
+        raise ValueError("cannot stat OVF file") from exc
+    if size > MAX_FILE_BYTES:
+        raise ValueError("OVF exceeds 64 MiB file limit")
+    try:
+        with source.open("rb") as stream:
+            first = _stream_record(stream)
+            if _normal(_comment(first)) != "oommf ovf 2.0":
+                raise ValueError("only OOMMF OVF 2.0 is supported")
+            if _normal(_comment(_stream_record(stream))) != "segment count: 1":
+                raise ValueError("OVF must declare exactly one segment")
+            if _normal(_comment(_stream_record(stream))) != "begin: segment":
+                raise ValueError("missing OVF segment")
+            if _normal(_comment(_stream_record(stream))) != "begin: header":
+                raise ValueError("missing OVF header")
+            header, times, hints = _stream_header(stream)
+            geometry, labels, units = _validate_header(header)
+            nx, ny, nz, step_m, origin_m = geometry
+            if times and any(value != times[0] for value in times[1:]):
+                raise ValueError("conflicting OVF simulation times")
+            if hints[0] and any(value != hints[0][0] for value in hints[0][1:]):
+                raise ValueError("conflicting unitless OVF simulation time hints")
+            if hints[0] and times:
+                raise ValueError("ambiguous mixed OVF simulation time units")
+            data_start = _stream_record(stream)
+            match = _DATA_BEGIN.fullmatch(_comment(data_start))
+            if not match:
+                raise ValueError("missing or unsupported OVF data section")
+            encoding = match.group(1).lower().replace(" ", "")
+            if encoding == "text":
+                # Do not make a second, subtly different text validator.
+                field = read_ovf(source, hash_content=False)
+                return OVFProbe(field.vectors.shape, field.step_m, field.origin_m,
+                                field.time_s, field.labels, field.units,
+                                field.encoding, field.time_hint, field.byte_count)
+            count = nx * ny * nz * 3
+            if count * np.dtype(np.float64).itemsize > MAX_VECTOR_BYTES:
+                raise ValueError("OVF exceeds 64 MiB vector limit")
+            width, check = (4, 1234567.0) if encoding == "binary4" else (8, 123456789012345.0)
+            payload_start = stream.tell()
+            check_raw = stream.read(width)
+            if len(check_raw) != width:
+                raise ValueError("OVF binary data is truncated")
+            value = struct.unpack("<f" if width == 4 else "<d", check_raw)[0]
+            if value != check:
+                raise ValueError("OVF binary check value or byte order is invalid")
+            payload_end = payload_start + (count + 1) * width
+            if payload_end > size:
+                raise ValueError("OVF binary data is truncated")
+            stream.seek(payload_end)
+            expected = f"End: Data Binary {width}"
+            if _normal(_comment(_stream_record(stream))) != _normal(expected):
+                raise ValueError("missing OVF data trailer")
+            if _normal(_comment(_stream_record(stream))) != "end: segment":
+                raise ValueError("missing OVF segment trailer")
+            if _stream_has_non_ignorable(stream):
+                raise ValueError("extra data after OVF segment")
+    except OSError as exc:
+        raise ValueError("cannot read OVF file") from exc
+    return OVFProbe((nz, ny, nx, 3), step_m, origin_m, times[0] if times else None,
+                    labels, units, encoding, tuple(hints[1]), size)
+
+
+def _stream_record(stream) -> bytes:
+    while True:
+        line = stream.readline()
+        if not line:
+            raise ValueError("truncated OVF record")
+        line = line.rstrip(b"\r\n")
+        if not _ignorable_record(line.strip()):
+            return line
+
+
+def _stream_header(stream):
+    header: dict[str, str] = {}
+    times: list[float] = []
+    unitless: list[float] = []
+    hints: list[str] = []
+    while True:
+        line = _stream_record(stream)
+        raw_text = _comment_raw(line)
+        text = raw_text.strip()
+        if _normal(text) == "end: header":
+            return header, times, (unitless, hints)
+        text = text.split("##", 1)[0].rstrip()
+        match = _TIME_DESC.fullmatch(text)
+        if match:
+            value = float(match.group(1))
+            if not np.isfinite(value):
+                raise ValueError("non-finite OVF simulation time")
+            times.append(value); continue
+        match = _UNITLESS_TIME_DESC.fullmatch(text)
+        if match:
+            value = float(match.group(1))
+            if not np.isfinite(value):
+                raise ValueError("non-finite OVF simulation time hint")
+            unitless.append(value); hints.append(raw_text.lstrip()); continue
+        if text.startswith("Desc: Total simulation time:"):
+            raise ValueError("malformed OVF simulation time")
+        if ":" not in text:
+            raise ValueError("malformed OVF header line")
+        key, value = (part.strip() for part in text.split(":", 1))
+        if not key or not value:
+            raise ValueError("malformed OVF header line")
+        key = key.lower()
+        if key in _CRITICAL_HEADERS:
+            if key in header:
+                raise ValueError(f"duplicate critical OVF header: {key}")
+            header[key] = value
+
+
+def _stream_has_non_ignorable(stream) -> bool:
+    while line := stream.readline():
+        if not _ignorable_record(line.rstrip(b"\r\n").strip()):
+            return True
+    return False
+
+
 def read_ovf(path, *, hash_content=True) -> OVFData:
     """Read a bounded, single-segment rectangular OVF 2.0 vector field."""
     source = Path(path)
@@ -53,7 +200,7 @@ def read_ovf(path, *, hash_content=True) -> OVFData:
         raise ValueError("OVF exceeds 64 MiB file limit")
     try:
         with source.open('rb') as stream:
-            raw = stream.read(MAX_FILE_BYTES + 1)
+            raw = stream.read(size)
     except OSError as exc:
         raise ValueError("cannot read OVF file") from exc
     if len(raw) > MAX_FILE_BYTES:
@@ -331,11 +478,10 @@ def _read_binary(raw: bytes, pos: int, count: int, width: int, check: float) -> 
     if len(raw) - pos < total:
         raise ValueError("OVF binary data is truncated")
     dtype = np.dtype("<f4" if width == 4 else "<f8")
-    body = raw[pos:pos + total]
-    values = np.frombuffer(body, dtype=dtype)
+    values = np.frombuffer(raw, dtype=dtype, count=count + 1, offset=pos)
     if values[0] != check:
         raise ValueError("OVF binary check value or byte order is invalid")
-    return np.array(values[1:], dtype=np.float64, copy=True), pos + total
+    return np.asarray(values[1:], dtype=np.float64), pos + total
 
 
 def _consume_data_end(raw: bytes, pos: int, encoding: str) -> int:

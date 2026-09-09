@@ -16,6 +16,26 @@ from mumax_sonic.mapping import map_sample
 from mumax_sonic.attention import Attention
 
 
+def test_small_input_read_does_not_request_the_entire_memory_budget(tmp_path, monkeypatch):
+    from mumax_sonic.sources.ovf_replay import _bounded_bytes
+    path = tmp_path / 'small.bin'
+    payload = b'x' * 1024
+    path.write_bytes(payload)
+    original_open = Path.open
+    requests = []
+    class TrackedFile:
+        def __init__(self, stream): self.stream = stream
+        def __enter__(self): return self
+        def __exit__(self, *args): self.stream.close()
+        def fileno(self): return self.stream.fileno()
+        def read(self, size=-1):
+            requests.append(size)
+            return self.stream.read(size)
+    monkeypatch.setattr(Path, 'open', lambda self, *a, **kw: TrackedFile(original_open(self, *a, **kw)))
+    assert _bounded_bytes(path, 256 * 1024 * 1024) == payload
+    assert requests and all(0 <= size <= len(payload) for size in requests)
+
+
 def write_ovf(path, values, time_s, *, labels='m_x m_y m_z', unit='1'):
     nz, ny, nx, _ = values.shape
     lines = ['# OOMMF OVF 2.0', '# Segment count: 1', '# Begin: Segment', '# Begin: Header',

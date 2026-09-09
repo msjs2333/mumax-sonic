@@ -10,7 +10,7 @@ P3d 已加入持续运行、真实成对开销基准与故障恢复测试。首�
 
 实时活动可勾选“关注区优先计算”，或增加 `--focus-compute`：前景即时分析、背景低频刷新。1500×500 CDW 存档帧上，约 4.7% 计算区域的前景中位约 31 ms；全帧读取、大圈计算和频带内存仍有限制。完整分项、采样优化与实际窗口/音频短测见 [关注区与全链路成本](docs/p3d-attention-validation.md)。
 
-CDW 持续输入验收已发现默认新鲜度下的过期静音：平均节奏测试中，发布到控制生效 p95 约 352–855 ms，尚未通过 100 ms 目标。详见 [持续输入验收](docs/p3d-continuous-validation.md)。
+最新 CDW 平均节奏持续复测中，127 帧全部观察到，未出现 stale；四种关注场景的发布到控制生效 p95 约 126–461 ms，尚未全面通过 100 ms 目标。本批去除了按 256 MiB 上限读取小掩膜的开销，并优化桥接、ROI 复用和聚合等待，见 [接入优化与复测](docs/p3d-ingest-validation.md)；此前基线见 [持续输入验收](docs/p3d-continuous-validation.md)。
 
 ```powershell
 python launch.py --backend-info
@@ -29,7 +29,7 @@ python launch.py --follow local/mumax3-live.json --recipe activity --aggregation
 
 桥接清单须是新路径并位于求解器输出目录之外。已有 `.mx3` 继续由原求解器执行，桥接只读输出，不更改仿真脚本。
 
-若目录还含 `m_initial.ovf` 等命名快照，桥接命令增加 `--pattern "m[0-9]*.ovf"`，只匹配连续数字序列。物理时间使用各帧 OVF 头部值，不能直接用帧号乘目标输出间隔代替。
+桥接默认匹配 `m[0-9]*.ovf`，排除 `m_initial.ovf` 等命名快照；其他命名可显式指定 `--pattern`。物理时间使用各帧 OVF 头部值，不能直接用帧号乘目标输出间隔代替。约两秒成批到达的源可明确配置 `--live-stale-s 4` 留出处理余量；数据年龄仍如实报告。
 
 在两个终端分别运行（发布目录须为空；可先启动跟随窗口）：
 

@@ -107,3 +107,59 @@ def test_live_bridge_and_import_work_without_content_hashing(tmp_path, monkeypat
         replay = load_ovf_replay(tmp_path/'manifest.json')
         assert replay.frames[-1].sequence == 1
         assert replay.sha256 == ''
+
+
+def test_default_pattern_excludes_named_snapshot_but_custom_pattern_is_preserved(tmp_path):
+    path = tmp_path / "out"; path.mkdir()
+    (path / "m000.ovf").write_bytes(_ovf())
+    (path / "m_initial.ovf").write_bytes(_ovf())
+    (path / "custom001.ovf").write_bytes(_ovf())
+    with _bridge(tmp_path) as bridge:
+        bridge.poll(); result = bridge.poll()
+        assert result["published_frames"] == 1
+    with MuMax3Bridge(path, tmp_path / "custom.json", entity_id="m", segment_id="s",
+                      all_material=True, pattern="custom*.ovf") as bridge:
+        bridge.poll(); assert bridge.poll()["published_frames"] == 1
+
+
+def test_manifest_replace_permission_error_retries_then_recovers_on_next_poll(tmp_path, monkeypatch):
+    path = tmp_path / "out"; path.mkdir()
+    (path / "m000.ovf").write_bytes(_ovf(0))
+    with _bridge(tmp_path) as bridge:
+        bridge.poll(); assert bridge.poll()["published_frames"] == 1
+        (path / "m001.ovf").write_bytes(_ovf(1e-12))
+        bridge.poll()
+        import mumax_sonic.sources.mumax3_bridge as module
+        original = module.os.replace
+        calls = {"count": 0}
+        def busy_then_ok(source, destination):
+            calls["count"] += 1
+            if calls["count"] < 3:
+                raise PermissionError("busy")
+            return original(source, destination)
+        monkeypatch.setattr(module.os, "replace", busy_then_ok)
+        result = bridge.poll()
+        assert result["published_frames"] == 2
+        assert calls["count"] == 3
+
+
+def test_manifest_replace_permanent_permission_error_waits_without_invalidating(tmp_path, monkeypatch):
+    path = tmp_path / "out"; path.mkdir()
+    (path / "m000.ovf").write_bytes(_ovf(0))
+    with _bridge(tmp_path) as bridge:
+        bridge.poll(); assert bridge.poll()["published_frames"] == 1
+        (path / "m001.ovf").write_bytes(_ovf(1e-12)); bridge.poll()
+        import mumax_sonic.sources.mumax3_bridge as module
+        original = module.os.replace
+        calls = {"count": 0}
+        def busy_for_one_poll(source, destination):
+            calls["count"] += 1
+            if calls["count"] <= 3:
+                raise PermissionError("busy")
+            return original(source, destination)
+        monkeypatch.setattr(module.os, "replace", busy_for_one_poll)
+        result = bridge.poll()
+        assert result["state"] == "waiting"
+        assert result["published_frames"] == 1
+        assert "temporarily busy" in result["reason"]
+        assert bridge.poll()["published_frames"] == 2

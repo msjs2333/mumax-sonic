@@ -627,7 +627,11 @@ class SonicApp:
             base = self.field_view
             adaptive = (self.aggregation_mode.get() == 'adaptive' and base.contributions is not None
                         and base.sample.validity == 'valid' and base.sample.coverage == 1
-                        and not self.transport.playing)
+                        and not self.transport.playing
+                        # Focus activity already reduces the field to <=272
+                        # contributions. Measured aggregation is sub-ms: avoid
+                        # an extra UI tick waiting for a background round trip.
+                        and 'focus_compute' not in base.diagnostic)
             if adaptive:
                 self._aggregation_worker.request(key, base, attention, self.source_budget.get())
                 completed = self._aggregation_worker.poll()

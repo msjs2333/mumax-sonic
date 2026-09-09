@@ -30,10 +30,14 @@ def main():
     parser.add_argument('manifest', type=Path)
     parser.add_argument('--phase-s', type=float, default=45)
     parser.add_argument('--dll')
+    parser.add_argument('--stale-s', type=float, default=2.0,
+                        help='Explicit freshness budget; reported separately from latency')
     parser.add_argument('--report', type=Path, required=True)
     args = parser.parse_args()
     if not math.isfinite(args.phase_s) or not 10 <= args.phase_s <= 600:
         parser.error('phase-s must be 10..600')
+    if not math.isfinite(args.stale_s) or args.stale_s <= 0:
+        parser.error('stale-s must be finite and positive')
     meta = json.loads(args.manifest.read_text(encoding='utf-8'))
     records = meta.pop('frames')
     base = args.manifest.resolve().parent
@@ -52,7 +56,7 @@ def main():
         parser.error('source cadence must span all four phases')
     phases = ['small_static', 'large_static', 'small_drag', 'large_drag']
     buckets = {name: dict(tick_ms=[], source_to_control_ms=[], source_to_observed_ms=[],
-        processing_ms=[], frame_lag=[], rss_bytes=[], states={}, audio_errors=[], applied_sequences=[]) for name in phases}
+        processing_ms=[], observed_to_control_ms=[], job_stages={}, frame_lag=[], rss_bytes=[], states={}, audio_errors=[], applied_sequences=[]) for name in phases}
     stop = threading.Event()
     published = {}
     publication_lateness = []
@@ -63,10 +67,11 @@ def main():
     applied = set()
     observed_events = {}
     applied_events = {}
+    jobs = []
     result = {}
     with tempfile.TemporaryDirectory(prefix='mumax-sonic-soak-') as temporary:
         live_path = Path(temporary) / 'live.json'
-        follower = LiveFollower(live_path, LiveConfig(recipe='activity')).start()
+        follower = LiveFollower(live_path, LiveConfig(recipe='activity', stale_after_s=args.stale_s)).start()
         configure_dpi()
         import tkinter as tk
         root = tk.Tk()
@@ -94,6 +99,13 @@ def main():
                 if stamp:
                     observed_events.setdefault(stamp[1], (time.monotonic(), stamp[0], snap['processing_ms']))
         follower._commit_valid = commit
+        original_reload = follower._reload
+        def reload(*positional, **keywords):
+            original_reload(*positional, **keywords)
+            job = follower.snapshot().get('last_job')
+            if job:
+                jobs.append(job)
+        follower._reload = reload
         original_diagnostic = app.engine._set_diagnostic
         def diagnostic(**values):
             original_diagnostic(**values)
@@ -182,6 +194,8 @@ def main():
                     target = buckets[phases[min(3, int((at-start)/args.phase_s))]]
                     target['applied_sequences'].append(seq)
                     target['source_to_control_ms'].append((at-ready)*1000)
+                    if seq in observed_events:
+                        target['observed_to_control_ms'].append((at-observed_events[seq][0])*1000)
             if diag.get('last_error') and diag['last_error'] not in bucket['audio_errors']:
                 bucket['audio_errors'].append(diag['last_error'])
             if elapsed >= duration or failures:
@@ -189,8 +203,14 @@ def main():
                 stop.set()
                 producer.join(timeout=2)
                 snap.pop('view', None)
+                completed_jobs = tuple(jobs)
+                for job in completed_jobs:
+                    target = buckets[phases[min(3, max(0, int((job['completed_at_s']-start)/args.phase_s)))]]
+                    for stage, cost in job['timings_ms'].items():
+                        target['job_stages'].setdefault(f"{job['kind']}:{stage}", []).append(cost)
                 for values in buckets.values():
-                    for key in ('tick_ms', 'source_to_control_ms', 'source_to_observed_ms', 'processing_ms', 'frame_lag', 'rss_bytes'):
+                    values['job_stages'] = {key: distribution(costs) for key, costs in values['job_stages'].items()}
+                    for key in ('tick_ms', 'source_to_control_ms', 'source_to_observed_ms', 'observed_to_control_ms', 'processing_ms', 'frame_lag', 'rss_bytes'):
                         values[key] = distribution(values[key])
                 result.update(duration_s=elapsed, phases=buckets, state_duration_s=state_durations,
                     published_frames=len(published), observed_unique=len(observations), applied_unique=len(applied),
@@ -200,6 +220,8 @@ def main():
                     cpu_core_equivalents=(time.process_time()-cpu_start)/elapsed,
                     publication_lateness_ms=distribution(publication_lateness), failures=failures,
                     source_errors=sorted(source_errors), publication_replace_retries=sum(replace_retries),
+                    stale_after_s=args.stale_s, jobs_completed=len(completed_jobs),
+                    slowest_jobs=sorted(completed_jobs, key=lambda job: job['completed_at_s']-job['started_at_s'], reverse=True)[:12],
                     note='Archived real fields and declared wall cadence; atomic manifest publication to first native control application, event timestamps correlated by unique physical time. Excludes solver, OVF writing, bridge stability/decode and acoustic/smoothing completion. Phases use event completion time, boundaries may contain prior-phase work. RSS/state/lag sampled from Tk about every 50ms, no RSS peak or leak guarantee. Missing sets are not completed by cutoff, including warmup/in-flight frames. No human listening.')
                 app.close()
                 return

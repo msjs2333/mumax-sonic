@@ -36,6 +36,32 @@ def test_uniform_rate_conserves_total_after_background_arrives():
         observer.close()
 
 
+def test_same_pair_and_tiles_reuse_physics_but_new_pair_recomputes(monkeypatch):
+    import mumax_sonic.observers.focused_activity as module
+    calls = []
+    original = module.observe_field
+    def measured(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(module, 'observe_field', measured)
+    previous, current = pair((64, 64))
+    observer = FocusedActivity(10)
+    try:
+        attention = Attention(extent_m=current.extent_m, origin_m=current.center_m[:2], radius=.2)
+        observer.observe(previous, current, attention)
+        repeated = observer.observe(previous, current, attention)
+        assert len(calls) == 1
+        assert repeated.diagnostic['focus_compute']['foreground_cache_hit']
+        p2, c2 = pair((64, 64), sequence=2)
+        observer.observe(p2, c2, attention)
+        assert len(calls) == 2
+        observer.observe(p2, c2, Attention(center=(.5, 0), extent_m=current.extent_m,
+                                         origin_m=current.center_m[:2], radius=.2))
+        assert len(calls) == 3
+    finally:
+        observer.close()
+
+
 def test_background_tiles_do_not_overlap_focus_bounds():
     previous, current = pair(); observer = FocusedActivity(.01)
     try:

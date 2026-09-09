@@ -2,6 +2,7 @@
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 
 import numpy as np
@@ -39,7 +40,12 @@ def _hash(raw, expected, name):
 
 def _bounded_bytes(path, limit):
     with Path(path).open('rb') as stream:
-        raw = stream.read(limit+1)
+        # Reading the ceiling itself allocates up to 256 MiB for a small mask
+        # on Windows. Bound the file size, then read only its actual payload.
+        size = os.fstat(stream.fileno()).st_size
+        if size > limit:
+            raise ValueError('input exceeds prototype size limit')
+        raw = stream.read(size)
     if len(raw) > limit:
         raise ValueError('input exceeds prototype size limit')
     return raw

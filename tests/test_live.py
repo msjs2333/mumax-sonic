@@ -2,6 +2,7 @@
 import json
 import time
 
+from mumax_sonic.attention import Attention
 from mumax_sonic.sources.live import LiveConfig, LiveFollower
 from test_ovf_replay import manifest
 
@@ -137,5 +138,96 @@ def test_published_history_cannot_be_removed(tmp_path):
         meta['frames'] = meta['frames'][1:]
         _publish(path, meta)
         assert 'truncated' in _wait(follower, 'invalid')['last_error']
+    finally:
+        follower.close()
+
+
+def test_roi_only_reuses_last_loaded_frames(tmp_path, monkeypatch):
+    path, meta = manifest(tmp_path, count=2)
+    follower = LiveFollower(path, LiveConfig(recipe='activity', poll_interval_s=.01)).start()
+    calls = []
+    original_load = follower._reader.load
+
+    def counted_load(source):
+        calls.append(source)
+        return original_load(source)
+
+    monkeypatch.setattr(follower._reader, 'load', counted_load)
+    try:
+        before = _wait(follower, 'current')
+        load_count = len(calls)
+        follower.set_attention(Attention(center=(.1, 0), radius=.2,
+                                         extent_m=before['view'].field.extent_m,
+                                         origin_m=before['view'].field.center_m[:2]), enabled=True)
+        deadline = time.monotonic() + 1.5
+        while time.monotonic() < deadline:
+            focused = follower.snapshot()
+            if focused['last_job'] and focused['last_job']['kind'] == 'roi':
+                break
+            time.sleep(.01)
+        end = time.monotonic() + .25
+        while time.monotonic() < end:
+            follower.set_attention(Attention(center=(.1, 0), radius=.2,
+                                             extent_m=before['view'].field.extent_m,
+                                             origin_m=before['view'].field.center_m[:2]), enabled=True)
+            time.sleep(.005)
+        assert focused['last_job']['kind'] == 'roi'
+        assert len(calls) == load_count
+        assert follower.snapshot()['updates'] == before['updates']
+    finally:
+        follower.close()
+
+
+def test_roi_does_not_revive_stale_or_invalid_state(tmp_path):
+    path, meta = manifest(tmp_path, count=2)
+    follower = LiveFollower(path, LiveConfig(recipe='activity', poll_interval_s=.01,
+                                              stale_after_s=.5)).start()
+    try:
+        current = _wait(follower, 'current')
+        stale = _wait(follower, 'stale')
+        follower.set_attention(Attention(center=(.2, 0), radius=.2,
+                                         extent_m=current['view'].field.extent_m,
+                                         origin_m=current['view'].field.center_m[:2]), enabled=True)
+        time.sleep(.05)
+        stale_after_roi = follower.snapshot()
+        assert stale_after_roi['state'] == 'stale'
+
+        path.write_text('{', encoding='utf-8')
+        _wait(follower, 'invalid')
+        follower.set_attention(Attention(center=(-.2, 0), radius=.2,
+                                         extent_m=current['view'].field.extent_m,
+                                         origin_m=current['view'].field.center_m[:2]), enabled=True)
+        time.sleep(.05)
+        bad = follower.snapshot()
+        assert bad['state'] == 'invalid'
+        assert bad['view'] is stale_after_roi['view']
+    finally:
+        follower.close()
+
+
+def test_new_manifest_frame_progresses_during_continuous_roi_requests(tmp_path):
+    path, meta = manifest(tmp_path, count=1)
+    follower = LiveFollower(path, LiveConfig(recipe='activity', poll_interval_s=.01,
+                                              stale_after_s=.5)).start()
+    try:
+        first = _wait(follower, 'current')
+        field = first['view'].field
+        for index in range(10):
+            follower.set_attention(Attention(center=(index * .01, 0), radius=.2,
+                                             extent_m=field.extent_m,
+                                             origin_m=field.center_m[:2]), enabled=True)
+            time.sleep(.005)
+        _, appended = manifest(tmp_path, count=2)
+        _publish(path, appended)
+        deadline = time.monotonic() + 1.5
+        while time.monotonic() < deadline:
+            latest = follower.snapshot()
+            if latest['state'] == 'current' and latest['view'].field.sequence == 1:
+                break
+            follower.set_attention(Attention(center=((time.monotonic() % .2), 0), radius=.2,
+                                             extent_m=field.extent_m, origin_m=field.center_m[:2]), enabled=True)
+            time.sleep(.01)
+        assert latest['view'].field.sequence == 1
+        assert latest['updates'] == 2
     finally:
         follower.close()

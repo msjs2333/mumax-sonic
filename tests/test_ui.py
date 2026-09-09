@@ -54,6 +54,31 @@ def test_no_audio_start_is_explicit(app):
     assert app.engine is None
 
 
+def test_focused_live_view_is_audible_in_first_tick_and_stale_still_mutes(app):
+    from mumax_sonic.observers.focused_activity import FocusedActivity
+    from mumax_sonic.sources.activity_demo import make_activity_frame
+    from mumax_sonic.sources.live import LiveConfig
+    observer = FocusedActivity()
+    try:
+        previous = make_activity_frame('activity_rotation', 0, size=64)
+        current = make_activity_frame('activity_rotation', 1, size=64)
+        view = observer.observe(previous, current, None)
+        state = dict(view=view, state='current', age_s=0, updates=1, reason='test')
+        source = SimpleNamespace(config=LiveConfig(recipe='activity'),
+                                 snapshot=lambda: dict(state), close=lambda: None)
+        app.attach_live_source(source)
+        app.source_budget.set(8)
+        app.aggregation_mode.set('adaptive')
+        app._tick()
+        assert app.sample.sequence == current.sequence
+        assert app.scene.validity == 'valid' and app.scene.sources
+        state['state'] = 'stale'
+        app._tick()
+        assert app.scene.validity == 'stale' and not app.scene.sources
+    finally:
+        observer.close()
+
+
 def test_mute_during_device_open_remains_muted(app):
     app.opening = True
     app.mute()
