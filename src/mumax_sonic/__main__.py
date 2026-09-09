@@ -16,8 +16,8 @@ def main():
     parser.add_argument("--no-hrtf", action="store_true", help="Use non-HRTF output for doctor/smoke comparison")
     parser.add_argument("--report", type=Path, help="Write diagnostics JSON for doctor/smoke")
     parser.add_argument('--field-demo', choices=['uniform', 'skyrmion', 'opposite_pair', 'wall_inplane', 'wall_pma', 'activity_rotation', 'activity_localized', 'band_in', 'band_out', 'band_opposite', 'band_mixed'], help='Open a field scene; activity scenes also support --audio-smoke')
-    parser.add_argument('--replay', type=Path, help='Open a vector NPZ replay in the GUI')
-    parser.add_argument('--inspect-field', type=Path, help='Compute and print observations of all NPZ frames without audio')
+    parser.add_argument('--replay', type=Path, help='Open a vector NPZ or OVF JSON manifest in the GUI')
+    parser.add_argument('--inspect-field', type=Path, help='Inspect NPZ or OVF JSON manifest frames without audio')
     parser.add_argument('--method', choices=['solid_angle', 'finite_difference'], default='solid_angle', help='Method for --inspect-field')
     parser.add_argument('--recipe', choices=['topology', 'activity', 'band'], default='topology', help='NPZ GUI/inspection recipe')
     parser.add_argument('--max-dt-ps', type=float, help='Explicit largest allowed activity interval; no cadence inferred when omitted')
@@ -47,9 +47,9 @@ def main():
         parser.error('--audio-smoke supports activity/band field demos or the default P1 moving source')
     max_dt_s = args.max_dt_ps*1e-12 if args.max_dt_ps is not None else None
     if args.inspect_field:
-        from .sources.replay import load_replay
+        from .sources.ovf_replay import load_field_replay
         from .field_pipeline import observe_field
-        replay = load_replay(args.inspect_field)
+        replay = load_field_replay(args.inspect_field)
         report = {'sha256': replay.sha256, 'frames': [observe_field(f, args.recipe, method=args.method,
             previous=replay.frames[i-1] if i else None, max_dt_s=max_dt_s, band_config=band_config,
             history=replay.frames[max(0, i-args.band_window+1):i+1]).diagnostic for i, f in enumerate(replay.frames)]}

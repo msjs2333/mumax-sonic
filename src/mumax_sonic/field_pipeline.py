@@ -1,5 +1,6 @@
 """Field observations are computed before attention and audio source selection."""
 from dataclasses import dataclass
+import json
 import numpy as np
 from .fields import FieldFrame
 from .model import Observation, Sample
@@ -135,4 +136,12 @@ def observe_field(frame, recipe='topology', *, method='solid_angle', boundary='o
     diagnostic.update(source_kind=frame.source_kind, entity_id=frame.entity_id, provenance=frame.provenance,
                       shape=list(frame.vectors.shape), dx_m=frame.dx_m, dy_m=frame.dy_m,
                       origin_m=list(frame.origin_m), sim_time_s=frame.sim_time_s)
+    # Preserve structured OVF lineage through the existing NPZ provenance prefix.
+    if '{"format": "OVF2"' in frame.provenance:
+        try:
+            info = json.loads(frame.provenance[frame.provenance.index('{"format": "OVF2"'):])
+            if isinstance(info, dict) and info.get('format') == 'OVF2':
+                diagnostic['input'] = info
+        except (ValueError, TypeError):
+            pass  # arbitrary legacy provenance remains available as text
     return FieldView(frame, sample, summary, diagnostic)

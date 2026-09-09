@@ -185,3 +185,23 @@ def test_band_navigation_switch_and_unsigned_controls(app):
     app.band_axis.set('0,0,0')
     app.apply_band()
     assert app.band_config == previous
+
+
+def test_ovf_manifest_window_load_and_navigation(app, tmp_path, monkeypatch):
+    # Independent bytes fixture; the UI must use the same source records as CLI.
+    from test_ovf_replay import manifest
+    from mumax_sonic.ui import app as app_module
+    path, _ = manifest(tmp_path, indices=(0, 1, 4, 5))
+    monkeypatch.setattr(app_module.filedialog, 'askopenfilename', lambda **kw: str(path))
+    app.load_field()
+    app.replay_recipe.set('活动')
+    app._tick()
+    assert app.sample.validity == 'warming_up'
+    app.step_frame(1)
+    app._tick()
+    assert app.field_view.diagnostic['mean_rad_s'] == pytest.approx(1e10)
+    assert 'OVF' in app.subtitle.get()
+    assert 'XYZ' in app.subtitle.get()
+    app.step_frame(1)
+    app._tick()
+    assert app.sample.validity == 'warming_up' and not app.scene.sources

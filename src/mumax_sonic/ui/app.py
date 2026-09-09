@@ -335,12 +335,12 @@ class SonicApp:
             self.status.set(f'间隔设置失败：{exc}')
 
     def load_field(self):
-        path = filedialog.askopenfilename(filetypes=[('Vector replay', '*.npz')])
+        path = filedialog.askopenfilename(filetypes=[('NPZ replay', '*.npz'), ('OVF sequence manifest', '*.json')])
         if not path:
             return
         try:
-            from ..sources.replay import load_replay
-            self.replay = load_replay(path)
+            from ..sources.ovf_replay import load_field_replay
+            self.replay = load_field_replay(path)
             self._labels['回放 · 三分量场'] = 'replay'
             self.scenario_combo.configure(values=list(self._labels))
             self.scenario.set('回放 · 三分量场')
@@ -547,6 +547,9 @@ class SonicApp:
                 self.legend.set('φ：音高 + 起伏速率编码\n强度为横向投影面积权重\n非拓扑符号 · 使用正声部输出')
             else:
                 self.legend.set('绿色 Q+ / 紫色 Q−\n圆为分块贡献，非粒子检测\n主声场最多 4 路 · 固定尺度')
+            input_info = self.field_view.diagnostic.get('input', {})
+            if input_info.get('format') == 'OVF2':
+                self.subtitle.set(f"OVF · {input_info['origin']} · {self.sample.time_kind} · XYZ 完整分量 · z 层 {input_info['z_index']} · 源帧号 {self.sample.sequence} · 箭头 XY / 蓝橙 ±z")
         else:
             self.subtitle.set('P1 · Synthetic 标签演示 · 未计算物理拓扑荷')
             self.legend.set('绿色 + / 紫色 −\n位置表示方位，音色表示符号\n主声场最多 4 路 · 虚拟距离固定')
@@ -604,8 +607,8 @@ def run(no_audio=False, dll_path=None, field_demo=None, replay_path=None, recipe
         app.scenario.set(FIELD_SCENARIOS[f'field:{field_demo}'])
         app.reset()
     if replay_path:
-        from ..sources.replay import load_replay
-        app.replay = load_replay(replay_path)
+        from ..sources.ovf_replay import load_field_replay
+        app.replay = load_field_replay(replay_path)
         app._labels['回放 · 三分量场'] = 'replay'
         app.scenario_combo.configure(values=list(app._labels))
         app.scenario.set('回放 · 三分量场')

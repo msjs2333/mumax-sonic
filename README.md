@@ -2,7 +2,17 @@
 
 面向微磁与相关磁性连续场仿真的空间可听化工具：用可解释的声音辅助感知状态、运动、频带活动与拓扑结构，并通过可调关注区域分配听觉注意力。
 
-**状态：P2c 频带最小配方已实现。** 支持拓扑、连续取向、活动与横向频带均方强度，含 NPZ 回放、窗口预热和缺帧检查。已用解析场验证；真实 MuMax/OVF、自动壁追踪和头追仍待实现。见 [P2c 实现与验证](docs/p2c-validation.md)。
+**状态：P2d OVF 序列导入已实现。** 支持拓扑、连续取向、活动与频带观察，NPZ/OVF 清单回放、显式层与材料掩膜、时间及哈希核对。已检查真实 MuMax+ 两帧回放和 MuMax3 单文件格式；真实自旋波频带、自动壁追踪与头追仍待验证或实现。见 [P2d 实现与验证](docs/p2d-validation.md)。
+
+## 运行 OVF 回放
+
+```powershell
+python scripts/make_ovf_demo.py local/ovf-demo --frames 320
+python scripts/make_ovf_manifest.py local/ovf-demo local/ovf-demo.json --limit 320 --origin synthetic --time-kind dynamics --all-material
+python launch.py --replay local/ovf-demo.json --recipe band
+```
+
+以上生成解析场，不运行求解器。真实输出可换成相应目录并声明 `--origin simulation`；全材料、材料掩膜、层号和动态/松弛时间必须与源数据一致。OVF 缺少可靠时间时，需手工填写有依据的逐帧时间清单。支持范围、清单示例和真实数据验证见 [P2d 文档](docs/p2d-validation.md)。
 
 ## 运行频带观察
 
@@ -50,7 +60,7 @@ python launch.py --replay local/pair.npz
 python launch.py --inspect-field local/pair.npz --method finite_difference --report local/pair.json
 ```
 
-“加载场”打开 NPZ，当前 GUI 回放支持拓扑、活动或频带。保存格式已升级到 v2，保留原始帧序号和逐帧来源；仍可读 v1，但 v1 没有帧序号，无法据此检测缺帧，界面会提示。文件生成不覆盖已有文件。格式见 [P2b 文档](docs/p2b-validation.md)，拓扑边界见 [P2a 文档](docs/p2a-validation.md)；NPZ 尚不直接读取 OVF。
+“加载场”打开 NPZ 或 OVF JSON 清单，当前 GUI 回放支持拓扑、活动或频带。保存格式已升级到 v2，保留原始帧序号和逐帧来源；仍可读 v1，但 v1 没有帧序号，无法据此检测缺帧，界面会提示。文件生成不覆盖已有文件。格式见 [P2b 文档](docs/p2b-validation.md)，拓扑边界见 [P2a 文档](docs/p2a-validation.md)；OVF 通过 [显式清单](docs/p2d-validation.md) 导入。
 
 ## 运行 P1
 
