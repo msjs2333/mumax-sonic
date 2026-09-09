@@ -227,3 +227,22 @@ def test_budget_changes_selection_not_physics_and_pause_keeps_report(app):
     assert app.selection_report['groups'][0]['absolute']['selected']==selected[0]['absolute']['selected']
     assert app.selection_report['groups'][0]['absolute']['output']==0
     assert '非零输出候选 0 路' in app.selection_note.get()
+
+
+def test_adaptive_roi_reuses_physics_and_regroups(app):
+    from mumax_sonic.ui.app import FIELD_SCENARIOS
+    app.scenario.set(FIELD_SCENARIOS['field:opposite_pair'])
+    app.aggregation_mode.set('adaptive')
+    app._tick()
+    before = app.field_view
+    app.center = (.3, -.2)
+    app._tick()
+    after = app.field_view
+    assert after.contributions is before.contributions
+    assert after.diagnostic['q_abs'] == before.diagnostic['q_abs']
+    assert after is not before
+    assert len(after.sample.observations) <= 4
+    assert after.diagnostic['adaptive_aggregation']['status'] == 'valid'
+    app._tick()
+    assert app.field_view is after
+    assert '空间 RMS' in app.selection_note.get()

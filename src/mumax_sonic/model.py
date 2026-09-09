@@ -20,6 +20,7 @@ class Observation:
     quantity: str = "synthetic_strength"
     unit: str = "1"
     orientation_enabled: bool = False
+    attention_weight: float | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "position_m", tuple(self.position_m))
@@ -29,6 +30,8 @@ class Observation:
             raise ValueError("observation must contain finite values")
         if self.strength < 0 or self.sign not in (-1, 1):
             raise ValueError("strength must be nonnegative; sign must be -1 or +1")
+        if self.attention_weight is not None and (not isfinite(self.attention_weight) or not 0 <= self.attention_weight <= 1):
+            raise ValueError("aggregate attention weight must be finite in [0, 1]")
 
 
 @dataclass(frozen=True)

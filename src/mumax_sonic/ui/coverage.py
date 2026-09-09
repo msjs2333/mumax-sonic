@@ -5,7 +5,7 @@ def _percent(value):
     return '—' if value is None else f'{100*value:.1f}%'
 
 
-def selection_summary(report):
+def _selection_summary(report):
     budget = report['budget']
     if report['validity'] != 'valid':
         return f"声源预算 {budget} · 数据未就绪，贡献覆盖不计算（{report['validity']}）"
@@ -31,3 +31,15 @@ def selection_summary(report):
     if len(groups) > 1:
         text += f" · 另 {len(groups)-1} 组量独立统计，见导出"
     return text
+
+
+def selection_summary(report):
+    text = _selection_summary(report)
+    info = report.get('adaptive_aggregation')
+    if info is None:
+        return text
+    if info['status'] != 'valid':
+        return text + '\n自适应未启用，保留固定分块：' + info['reason']
+    # Replace the explanatory second line to keep the control panel compact.
+    return text.split('\n')[0] + (f"\n自适应：前景 {info['foreground_sources']} / 背景 {info['background_sources']} / 总览 {info['overview_sources']}"
+        f" · 空间 RMS {info['spatial_rms_m']*1e9:.1f} nm · 背景为区域汇总，非点状纹理")

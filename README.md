@@ -2,7 +2,14 @@
 
 面向微磁与相关磁性连续场仿真的空间可听化工具：用可解释的声音辅助感知状态、运动、频带活动与拓扑结构，并通过可调关注区域分配听觉注意力。
 
-**状态：P2e 可调预算与贡献覆盖已实现。** 声源可选 1–16 路，默认 4 路；窗口和导出分别显示聚合损失、符号筛除、关注静音、预算省略与选入贡献。支持原有 NPZ/OVF、拓扑/取向/活动/频带。见 [P2e 实现与验证](docs/p2e-validation.md)。
+**状态：P2f 自适应聚合与背景汇总已实现。** 拓扑正负、活动和频带贡献先逐位置计算，再按关注区域分配 1–16 路声源。固定分块仍为默认，可切换对比；空间误差与贡献覆盖分别报告。见 [P2f 实现与验证](docs/p2f-validation.md)。
+
+```powershell
+python launch.py --field-demo opposite_pair --aggregation adaptive --source-budget 4
+python launch.py --field-demo activity_localized --aggregation adaptive --source-budget 8
+```
+
+窗口“空间聚合”中 `fixed` 为固定分块，`adaptive` 为关注区细分和背景汇总。虚线声源表示背景汇总；100% 贡献覆盖不表示空间细节完整保留。连续取向目前回退固定分块。
 
 ## 调整声源与查看覆盖
 

@@ -84,6 +84,9 @@ class SonicApp:
         self.scene = SonicScene()
         self.selection_report = None
         self.source_budget = tk.IntVar(value=4)
+        self.aggregation_mode = tk.StringVar(value='fixed')
+        self._aggregation_key = None
+        self._aggregation_view = None
         self.selection_note = tk.StringVar()
         self._labels = {v: k for k, v in SCENARIOS.items()}
         self._labels.update({v: k for k, v in FIELD_SCENARIOS.items()})
@@ -187,6 +190,8 @@ class SonicApp:
         ttk.Button(band_row, text='应用频带', command=self.apply_band).pack(side='left')
         ttk.Label(band_row, text='声源上限 / 分摊音量').pack(side='left', padx=(16, 4))
         ttk.Combobox(band_row, textvariable=self.source_budget, values=list(range(1, MAX_SOURCE_BUDGET+1)), state='readonly', width=4).pack(side='left')
+        ttk.Label(band_row, text='空间聚合').pack(side='left', padx=(12, 4))
+        ttk.Combobox(band_row, textvariable=self.aggregation_mode, values=['fixed', 'adaptive'], state='readonly', width=9).pack(side='left')
         ttk.Label(shell, textvariable=self.data_note, style='Muted.TLabel', wraplength=1040).pack(anchor='w', pady=(0, 5))
         middle = ttk.Frame(shell)
         middle.pack(fill="both", expand=True)
@@ -462,12 +467,19 @@ class SonicApp:
             if o.sign < 0:
                 radius += 4
             c.create_oval(px-radius, py-radius, px+radius, py+radius, outline=color,
-                          width=3 if attention.contains(o) else 1, tags=(f'source:{o.source_id}',))
+                          width=3 if attention.contains(o) else 1,
+                          dash=(3, 3) if o.source_id.endswith(':background') else (), tags=(f'source:{o.source_id}',))
             if gains.get(o.source_id, 0) > 0:
                 c.create_oval(px-3, py-3, px+3, py+3, fill=TEXT, outline='', tags=(f'selected:{o.source_id}',))
             if self.field_view is None or gains.get(o.source_id, 0) > 0:
+                label = o.source_id
+                if label.startswith('adaptive:'):
+                    parts = label.split(':')
+                    label = {'background': '背景', 'focus': '前景', 'overview': '总览'}[parts[2]]
+                    if len(parts) > 3:
+                        label += parts[3].replace('root', '').replace('.', '')
                 c.create_text(px, py + (radius+13)*(1 if o.sign > 0 else -1),
-                              text=('b ' if band else 'a ' if activity else ('φ ' if o.orientation_enabled else ("+ " if o.sign > 0 else "− ")))+o.source_id, fill=color)
+                              text=('b ' if band else 'a ' if activity else ('φ ' if o.orientation_enabled else ("+ " if o.sign > 0 else "− ")))+label, fill=color)
             a = o.orientation_rad
             if o.orientation_enabled or self.field_view is None:
                 c.create_line(px, py, px+radius*math.cos(a), py-radius*math.sin(a), fill=color, arrow="last")
@@ -506,6 +518,15 @@ class SonicApp:
         field = self.field_view.field if self.field_view else None
         attention = Attention(self.center, self.radius.get(), self.background.get(),
                               field.extent_m if field else 1e-6, field.center_m[:2] if field else (0, 0))
+        if self.field_view is not None:
+            from ..field_pipeline import apply_aggregation
+            key = (id(self.field_view), attention, self.source_budget.get(), self.aggregation_mode.get())
+            if key != self._aggregation_key:
+                self._aggregation_base = self.field_view  # retain identity until cache replacement
+                self._aggregation_view = apply_aggregation(self.field_view, attention, self.source_budget.get(), self.aggregation_mode.get())
+                self._aggregation_key = key
+            self.field_view = self._aggregation_view
+            self.sample = self.field_view.sample
         is_activity = self.field_view is not None and self.field_view.diagnostic['recipe'] == 'activity'
         is_band = self.field_view is not None and self.field_view.diagnostic['recipe'] == 'band'
         unsigned = is_activity or is_band
@@ -602,7 +623,7 @@ class SonicApp:
         self.window.destroy()
 
 
-def run(no_audio=False, dll_path=None, field_demo=None, replay_path=None, recipe='topology', max_dt_s=None, activity_reference=1e9, band_config=None, band_reference=0.005, source_budget=4):
+def run(no_audio=False, dll_path=None, field_demo=None, replay_path=None, recipe='topology', max_dt_s=None, activity_reference=1e9, band_config=None, band_reference=0.005, source_budget=4, aggregation='fixed'):
     configure_dpi()
     root = tk.Tk()
     app = SonicApp(root, no_audio=no_audio, dll_path=dll_path)
@@ -615,6 +636,7 @@ def run(no_audio=False, dll_path=None, field_demo=None, replay_path=None, recipe
         app.band_axis.set(','.join(str(v) for v in band_config.reference_axis))
     app.band_reference = band_reference
     app.source_budget.set(source_budget)
+    app.aggregation_mode.set(aggregation)
     app.max_dt_s = max_dt_s
     app.max_dt_ns.set('' if max_dt_s is None else f'{max_dt_s*1e9:g}')
     app.activity_reference = activity_reference

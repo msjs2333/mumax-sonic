@@ -29,6 +29,7 @@ def main():
     parser.add_argument('--band-reference', type=float, default=0.005)
     from .model import MAX_SOURCE_BUDGET
     parser.add_argument('--source-budget', type=int, default=4, choices=range(1, MAX_SOURCE_BUDGET+1), help='Maximum spatial voices; default 4, gain headroom uses 1/budget')
+    parser.add_argument('--aggregation', choices=['fixed', 'adaptive'], default='fixed', help='Spatial contribution grouping')
     args = parser.parse_args()
     band_config = None
     if args.recipe == 'band' or (args.field_demo and args.field_demo.startswith('band_')) or not (args.doctor or args.audio_smoke is not None):
@@ -50,7 +51,7 @@ def main():
     max_dt_s = args.max_dt_ps*1e-12 if args.max_dt_ps is not None else None
     if args.inspect_field:
         from .sources.ovf_replay import load_field_replay
-        from .field_pipeline import observe_field
+        from .field_pipeline import observe_field, apply_aggregation
         replay = load_field_replay(args.inspect_field)
         from .attention import Attention
         from .mapping import map_sample_with_report
@@ -62,6 +63,7 @@ def main():
                 previous=replay.frames[i-1] if i else None, max_dt_s=max_dt_s, band_config=band_config,
                 history=replay.frames[max(0,i-args.band_window+1):i+1])
             attention = Attention(extent_m=frame.extent_m, origin_m=frame.center_m[:2])
+            view = apply_aggregation(view, attention, args.source_budget, args.aggregation)
             mapped = map_sample_with_report(view.sample, attention, budget=args.source_budget, strength_reference=reference)
             reports.append(dict(view.diagnostic, selection=field_selection_report(view,mapped.report)))
         report = dict(sha256=replay.sha256, frames=reports, source_budget=args.source_budget,
@@ -89,7 +91,7 @@ def main():
                     reference = 1.0
                     if args.field_demo and args.field_demo.startswith('band_'):
                         from .sources.band_demo import make_band_frame, STEP_S
-                        from .field_pipeline import observe_field
+                        from .field_pipeline import observe_field, apply_aggregation
                         index = int(elapsed*1e-9/STEP_S)
                         history = tuple(make_band_frame(args.field_demo, i) for i in range(max(0, index-args.band_window+1), index+1))
                         view = observe_field(history[-1], 'band', history=history, band_config=band_config)
@@ -99,7 +101,7 @@ def main():
                         report['band_reference'] = reference
                     elif args.field_demo:
                         from .sources.activity_demo import make_activity_frame, STEP_S
-                        from .field_pipeline import observe_field
+                        from .field_pipeline import observe_field, apply_aggregation
                         index = int(elapsed*1e-9/STEP_S)
                         frame = make_activity_frame(args.field_demo, index)
                         previous = make_activity_frame(args.field_demo, index-1) if index else None
@@ -110,7 +112,13 @@ def main():
                         report['activity_reference_rad_s'] = reference
                     else:
                         sample = make_sample("moving", elapsed*1e-9, sequence)
-                    mapped = map_sample_with_report(sample, Attention(background=1), master_gain=0.06, strength_reference=reference, budget=args.source_budget)
+                    attention = Attention(background=1)
+                    if args.field_demo:
+                        attention = Attention(background=1, extent_m=view.field.extent_m, origin_m=view.field.center_m[:2])
+                        view = apply_aggregation(view, attention, args.source_budget, args.aggregation)
+                        sample = view.sample
+                        report[view.diagnostic['recipe']] = view.diagnostic
+                    mapped = map_sample_with_report(sample, attention, master_gain=0.06, strength_reference=reference, budget=args.source_budget)
                     report['selection'] = mapped.report
                     engine.update(mapped.scene)
                     counts = engine.diagnostics()
@@ -137,7 +145,7 @@ def main():
     else:
         from .ui.app import run
         run(no_audio=args.no_audio, dll_path=args.dll, field_demo=args.field_demo, replay_path=args.replay,
-            recipe=args.recipe, max_dt_s=max_dt_s, activity_reference=args.activity_reference_rad_s, band_config=band_config, band_reference=args.band_reference, source_budget=args.source_budget)
+            recipe=args.recipe, max_dt_s=max_dt_s, activity_reference=args.activity_reference_rad_s, band_config=band_config, band_reference=args.band_reference, source_budget=args.source_budget, aggregation=args.aggregation)
 
 
 if __name__ == "__main__":

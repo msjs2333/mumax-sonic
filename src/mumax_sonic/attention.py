@@ -33,6 +33,8 @@ class Attention:
         return self.distance(observation) <= self.radius
 
     def weight(self, observation: Observation) -> float:
+        if observation.attention_weight is not None:
+            return observation.attention_weight
         # Flat core and C1-continuous feathering across the drawn ROI boundary.
         t = max(0.0, min(1.0, (self.distance(observation) / self.radius - 0.65) / 0.7))
         return self.background + (1 - self.background) * (1 - t * t * (3 - 2 * t))

@@ -1,11 +1,12 @@
 """Field observations are computed before attention and audio source selection."""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import numpy as np
 from .fields import FieldFrame
 from .model import Observation, Sample
 from .observers.topology import topology
 from .observers.texture import direction_angle
+from .aggregation import ContributionGrid, aggregate
 
 
 @dataclass(frozen=True)
@@ -14,6 +15,7 @@ class FieldView:
     sample: Sample
     summary: str
     diagnostic: dict
+    contributions: ContributionGrid | None = None
 
 
 def _tiles(shape, divisions=4):
@@ -26,6 +28,7 @@ def observe_field(frame, recipe='topology', *, method='solid_angle', boundary='o
                   domain_axis=(1, 0, 0), reference_axis=(0, 1, 0), previous=None, max_dt_s=None,
                   history=None, band_config=None):
     observations = []
+    contributions = None
     validity_override = None
     input_positive = input_negative = 0.0
     aggregation_basis = 'observer contributions before fixed 4x4 spatial tiles'
@@ -33,6 +36,8 @@ def observe_field(frame, recipe='topology', *, method='solid_angle', boundary='o
         result = topology(frame.vectors, frame.dx_m, frame.dy_m, mask=frame.mask,
                           method=method, boundary=boundary)
         x, y = result.x_m + frame.origin_m[0], result.y_m + frame.origin_m[1]
+        contributions = ContributionGrid(x, y, np.where(result.valid, result.positive, 0),
+            np.where(result.valid, result.negative, 0), frame.origin_m[2], frame.entity_id, f'Q_tile_{method}', '1')
         for tile, index in _tiles(result.positive.shape):
             for sign, channel in ((1, result.positive), (-1, result.negative)):
                 weights = np.where(result.valid[index], channel[index], 0.0)
@@ -85,6 +90,8 @@ def observe_field(frame, recipe='topology', *, method='solid_angle', boundary='o
         x, y = np.meshgrid(np.arange(nx)*frame.dx_m+frame.origin_m[0],
                            np.arange(ny)*frame.dy_m+frame.origin_m[1])
         material_count = int(np.count_nonzero(frame.mask))
+        contributions = ContributionGrid(x, y, np.where(result.valid, result.rate_rad_s, 0)/max(1, material_count),
+            np.zeros_like(x), frame.origin_m[2], frame.entity_id, 'angular_activity_mean_contribution', 'rad/s')
         for tile, index in _tiles(result.valid.shape):
             weights = np.where(result.valid[index], result.rate_rad_s[index], 0.0)
             total = float(np.sum(weights))
@@ -115,6 +122,8 @@ def observe_field(frame, recipe='topology', *, method='solid_angle', boundary='o
         x, y = np.meshgrid(np.arange(nx)*frame.dx_m+frame.origin_m[0],
                            np.arange(ny)*frame.dy_m+frame.origin_m[1])
         count = int(np.count_nonzero(frame.mask))
+        contributions = ContributionGrid(x, y, np.where(result.valid, result.power, 0)/max(1, count),
+            np.zeros_like(x), frame.origin_m[2], frame.entity_id, 'transverse_band_mean_square_contribution', '1')
         for tile, index in _tiles(result.valid.shape):
             weights = np.where(result.valid[index], result.power[index], 0.0)
             total = float(np.sum(weights))
@@ -160,7 +169,35 @@ def observe_field(frame, recipe='topology', *, method='solid_angle', boundary='o
                 diagnostic['input'] = info
         except (ValueError, TypeError):
             pass  # arbitrary legacy provenance remains available as text
-    return FieldView(frame, sample, summary, diagnostic)
+    return FieldView(frame, sample, summary, diagnostic, contributions)
+
+
+def apply_aggregation(view, attention, budget=4, mode='fixed'):
+    """Regroup already computed scalar contributions; never recompute physics."""
+    if mode == 'fixed':
+        return view
+    if mode != 'adaptive':
+        raise ValueError('unknown spatial aggregation mode')
+    diagnostic = dict(view.diagnostic)
+    if view.sample.validity != 'valid' or view.sample.coverage != 1:
+        info = dict(status=view.sample.validity, reason='physical observation is not fully valid')
+    elif view.contributions is None:
+        info = dict(status='unsupported', reason='continuous direction requires circular aggregation; using fixed tiles')
+    else:
+        result = aggregate(view.contributions, attention, budget)
+        info = result.diagnostic
+        if info['status'] == 'valid':
+            channels = {}
+            for label, signs in (('positive', (1,)), ('negative', (-1,)), ('absolute', (1, -1))):
+                before = view.diagnostic['spatial_aggregation']['channels'][label]['input']
+                represented = sum(o.strength for o in result.observations if o.sign in signs)
+                channels[label] = dict(input=before, represented=represented, omitted=max(0.0, before-represented))
+            diagnostic['spatial_aggregation'] = dict(method='adaptive',
+                basis='per-site observer contributions; signs conserved separately; soft focus and background', channels=channels)
+            diagnostic['adaptive_aggregation'] = info
+            return replace(view, sample=replace(view.sample, observations=result.observations), diagnostic=diagnostic)
+    diagnostic['adaptive_aggregation'] = dict(info, fallback='fixed_4x4')
+    return replace(view, diagnostic=diagnostic)
 
 
 def field_selection_report(view, report):
@@ -168,6 +205,8 @@ def field_selection_report(view, report):
     result = dict(report)
     aggregation = view.diagnostic['spatial_aggregation']
     result['spatial_aggregation'] = aggregation
+    if 'adaptive_aggregation' in view.diagnostic:
+        result['adaptive_aggregation'] = view.diagnostic['adaptive_aggregation']
     fractions = {}
     for channel, values in aggregation['channels'].items():
         before = values['input']
