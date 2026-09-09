@@ -61,6 +61,18 @@ def load_ovf_replay(path):
         raise ValueError('OVF manifest exceeds 8 MiB')
     raw = _bounded_bytes(path, 8*1024*1024)
     meta = json.loads(raw, object_pairs_hook=_unique_keys)
+    return _load_ovf_manifest(path, meta, raw)
+
+
+def _load_ovf_manifest(path, meta, raw=None):
+    """Validate already-read manifest metadata and decode its declared frames.
+
+    This internal entry point lets a follower apply exactly the offline OVF
+    validation to a newly appended record without reading historical bodies.
+    """
+    path = Path(path)
+    if raw is None:
+        raw = json.dumps(meta, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
     if not isinstance(meta, dict) or type(meta.get('schema_version')) is not int or meta['schema_version'] != 1:
         raise ValueError('unsupported OVF manifest schema')
     for name in ('entity_id', 'segment_id'):

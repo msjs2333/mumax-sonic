@@ -2,7 +2,23 @@
 
 面向微磁与相关磁性连续场仿真的空间可听化工具：用可解释的声音辅助感知状态、运动、频带活动与拓扑结构，并通过可调关注区域分配听觉注意力。
 
-**状态：P3a 已实现 OVF 发布清单后台跟随。** 读取和物理观察在后台进行，支持等待、有效、失效静音与恢复，保留自适应聚合。尚未接入 MuMax+ 求解器直接采样。见 [P3a 验证记录](docs/p3a-validation.md)。
+**状态：P3b/P3c 已实现。** 支持 MuMax3 完整 OVF 输出桥接、增量读取和 MuMax+ 直接采样；已验证两个真实小网格后端。运行限制与证据见 [P3b/P3c 验证记录](docs/p3bc-validation.md)。
+
+```powershell
+python launch.py --backend-info
+python scripts/run_mumaxplus_live.py --frames 60
+```
+
+第二条命令会运行真实 MuMax+ 16×16 小网格示例并打开窗口，需可用的 MuMax+ 和 CUDA。点击“试听 / 重连”开启声音。
+
+MuMax3 输出使用两个终端桥接与探听，材料域必须与仿真一致（非全材料时改用 `--mask`）：
+
+```powershell
+python scripts/follow_mumax3.py path/to/run.out local/mumax3-live.json --entity m --segment run-01 --all-material --duration-s 60
+python launch.py --follow local/mumax3-live.json --recipe activity --aggregation adaptive --source-budget 8
+```
+
+桥接清单须是新路径并位于求解器输出目录之外。已有 `.mx3` 继续由原求解器执行，桥接只读输出，不更改仿真脚本。
 
 在两个终端分别运行（发布目录须为空；可先启动跟随窗口）：
 

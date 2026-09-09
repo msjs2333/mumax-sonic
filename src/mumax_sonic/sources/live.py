@@ -16,6 +16,7 @@ import time
 
 from ..field_pipeline import FieldView, observe_field
 from .ovf_replay import load_field_replay
+from .incremental import IncrementalOVFReader
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,9 @@ class LiveFollower:
         if not isinstance(config, LiveConfig):
             raise TypeError('config must be a LiveConfig')
         self.config = config
+        retain = (config.band_config.window_samples if config.band_config is not None else 256) if config.recipe == 'band' else 2
+        self._reader = IncrementalOVFReader(retain_frames=retain)
+        self._reader_diagnostics = {}
         self._lock = Lock()
         self._stop = Event()
         self._thread: Thread | None = None
@@ -90,7 +94,7 @@ class LiveFollower:
                 state, reason = 'stale', 'no new physical frame before stale deadline'
             return dict(view=self._view, state=state, reason=reason,
                         age_s=age, updates=self._updates, skipped_observation_frames=self._skipped_observation_frames, last_error=self._last_error,
-                        processing_ms=self._processing_ms)
+                        processing_ms=self._processing_ms, reader=dict(self._reader_diagnostics))
 
     def _run(self):
         while not self._stop.is_set():
@@ -117,7 +121,7 @@ class LiveFollower:
 
     def _reload(self, started):
         try:
-            replay = load_field_replay(self.path)
+            replay = self._reader.load(self.path)
             manifest_hash = replay.sha256
             if manifest_hash == self._last_manifest_hash:
                 # A recovered valid publication may have exactly the same
@@ -125,8 +129,9 @@ class LiveFollower:
                 # It clears invalid status but never resets physical freshness.
                 self._republish_known_valid(started)
                 return
-            frames = tuple(replace(frame, source_kind='live') for frame in replay.frames)
-            fingerprints = [(self._key(frame), self._raw_fingerprint(frame)) for frame in replay.frames]
+            frames = replay.frames
+            fingerprints = [((segment, sequence, sim_time), fingerprint)
+                            for segment, sequence, sim_time, fingerprint in self._reader.records]
             self._validate_immutable(fingerprints)
             latest = frames[-1]
             key = self._key(replay.frames[-1])
@@ -139,9 +144,13 @@ class LiveFollower:
                 view = observe_field(latest, self.config.recipe, method=self.config.method,
                     previous=previous, max_dt_s=self.config.max_dt_s, history=frames,
                     band_config=self.config.band_config)
+                view = replace(view, field=replace(latest, source_kind='live'),
+                    sample=replace(view.sample, source_kind='live'), diagnostic=dict(view.diagnostic, source_kind='live'))
             else:
                 view = self._view
             self._commit_valid(started, manifest_hash, fingerprints, view, is_new)
+            with self._lock:
+                self._reader_diagnostics = self._reader.diagnostics
         except Exception as exc:
             self._publish_invalid(started, str(exc))
 

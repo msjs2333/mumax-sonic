@@ -92,6 +92,7 @@ class SonicApp:
         self._aggregation_base = None
         self._aggregation_completed_at = 0.0
         self.live_follower = None
+        self._external_live_source = None
         self.live_path = None
         self.live_stale_s = 2.0
         self.live_snapshot = None
@@ -343,6 +344,14 @@ class SonicApp:
             self.seek_to(max(0, index+delta)*STEP_S)
 
     def apply_band(self):
+        if self._external_live_source is not None and self._labels[self.scenario.get()] == 'live':
+            self.status.set('直接采样的频带参数由生产端 LiveConfig 定义')
+            config = self._external_live_source.config.band_config or self.band_config
+            self.band_low.set(f'{config.low_hz/1e9:g}')
+            self.band_high.set(f'{config.high_hz/1e9:g}')
+            self.band_window.set(str(config.window_samples))
+            self.band_axis.set(','.join(str(v) for v in config.reference_axis))
+            return
         from ..observers.band import BandConfig
         try:
             config = BandConfig(float(self.band_low.get())*1e9, float(self.band_high.get())*1e9,
@@ -353,6 +362,11 @@ class SonicApp:
             self.status.set(f'频带设置失败：{exc}')
 
     def apply_max_dt(self):
+        if self._external_live_source is not None and self._labels[self.scenario.get()] == 'live':
+            value = self._external_live_source.config.max_dt_s
+            self.max_dt_ns.set('' if value is None else f'{value*1e9:g}')
+            self.status.set('直接采样的间隔约束由生产端 LiveConfig 定义')
+            return
         try:
             value = float(self.max_dt_ns.get())*1e-9 if self.max_dt_ns.get().strip() else None
             if value is not None and (not math.isfinite(value) or value <= 0):
@@ -429,6 +443,7 @@ class SonicApp:
         return self._field_cache
 
     def follow_live(self, path, stale_after_s=2.0):
+        self._external_live_source = None
         self.live_path = Path(path)
         self.live_stale_s = stale_after_s
         self._labels['实时 · OVF 发布清单'] = 'live'
@@ -437,7 +452,26 @@ class SonicApp:
         self.transport.playing = False
         self._live_settings = None
 
+    def attach_live_source(self, source):
+        """Attach a running host-frame source; no solver calls occur on Tk."""
+        if self.live_follower is not None:
+            self.live_follower.close()
+        self._external_live_source = self.live_follower = source
+        self.live_stale_s = source.config.stale_after_s
+        self._live_settings = ('direct', id(source), source.config)
+        self._labels['实时 · 直接采样'] = 'live'
+        self.scenario_combo.configure(values=list(self._labels))
+        self.scenario.set('实时 · 直接采样')
+        self.replay_recipe.set({'activity': '活动', 'band': '频带'}.get(source.config.recipe, '拓扑'))
+        self.transport.playing = False
+        self._aggregation_base = None
+
     def _poll_live(self):
+        if self._external_live_source is not None:
+            source = self._external_live_source
+            self.replay_recipe.set({'activity': '活动', 'band': '频带'}.get(source.config.recipe, '拓扑'))
+            self.live_snapshot = source.snapshot()
+            return self.live_snapshot
         from ..sources.live import LiveConfig, LiveFollower
         recipe = {'活动': 'activity', '频带': 'band'}.get(self.replay_recipe.get(), 'topology')
         settings = (self.live_path, recipe, self.max_dt_s, self.band_config, self.live_stale_s)
@@ -723,7 +757,7 @@ class SonicApp:
         self.window.destroy()
 
 
-def run(no_audio=False, dll_path=None, field_demo=None, replay_path=None, recipe='topology', max_dt_s=None, activity_reference=1e9, band_config=None, band_reference=0.005, source_budget=4, aggregation='fixed', follow_path=None, live_stale_s=2.0):
+def run(no_audio=False, dll_path=None, field_demo=None, replay_path=None, recipe='topology', max_dt_s=None, activity_reference=1e9, band_config=None, band_reference=0.005, source_budget=4, aggregation='fixed', follow_path=None, live_stale_s=2.0, live_source=None):
     configure_dpi()
     root = tk.Tk()
     app = SonicApp(root, no_audio=no_audio, dll_path=dll_path)
@@ -752,6 +786,8 @@ def run(no_audio=False, dll_path=None, field_demo=None, replay_path=None, recipe
         app.reset()
     if follow_path:
         app.follow_live(follow_path, live_stale_s)
+    if live_source is not None:
+        app.attach_live_source(live_source)
     root.mainloop()
 
 

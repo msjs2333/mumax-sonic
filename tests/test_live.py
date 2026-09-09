@@ -98,12 +98,12 @@ def test_snapshot_becomes_stale_even_while_reload_is_blocked(tmp_path, monkeypat
     release, entered = Event(), Event()
     try:
         _wait(follower, 'current')
-        original = live.load_field_replay
+        original = follower._reader.load
         def blocked(path):
             entered.set()
             assert release.wait(2)
             return original(path)
-        monkeypatch.setattr(live, 'load_field_replay', blocked)
+        monkeypatch.setattr(follower._reader, 'load', blocked)
         meta['note'] = 'republish'
         _publish(path, meta)
         assert entered.wait(1)

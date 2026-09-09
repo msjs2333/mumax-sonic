@@ -32,7 +32,17 @@ def main():
     parser.add_argument('--aggregation', choices=['fixed', 'adaptive'], default='fixed', help='Spatial contribution grouping')
     parser.add_argument('--follow', type=Path, help='Follow atomically published OVF JSON snapshots in the GUI')
     parser.add_argument('--live-stale-s', type=float, default=2.0, help='Mute live data after this wall-clock age without a new physical frame')
+    parser.add_argument('--backend-info', action='store_true', help='Probe MuMax3 executable and MuMax+ import capabilities without running a solver')
     args = parser.parse_args()
+    if args.backend_info:
+        import shutil
+        from .sources.mumaxplus import probe_mumaxplus
+        info = dict(mumax3_executable=shutil.which('mumax3'), mumaxplus=probe_mumaxplus())
+        print(report_json(info))
+        if args.report:
+            args.report.parent.mkdir(parents=True, exist_ok=True)
+            args.report.write_text(report_json(info), encoding='utf-8')
+        return
     if not math.isfinite(args.live_stale_s) or args.live_stale_s <= 0:
         parser.error('--live-stale-s must be finite and positive')
     if args.follow and (args.replay or args.inspect_field or args.field_demo or args.doctor or args.audio_smoke is not None):
