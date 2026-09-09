@@ -286,6 +286,10 @@ class AudioEngine:
             "adaptive_smoothing_tau_ms": 120,
             "target_source_count": 0,
             "control_apply_latency_ms": None, "control_apply_latency_p95_ms": None,
+            # ``last_control_applied_at_s`` is monotonic-process time, sampled
+            # after the worker has submitted this valid scene's OpenAL source
+            # controls.  It is deliberately not an acoustic/device timestamp.
+            "last_applied_sim_time_s": None, "last_control_applied_at_s": None,
             "dropped_updates": 0, "scene_age_ms": None, "scene_validity": None,
             "data_state": "no_scene", "data_message": None,
         }
@@ -443,6 +447,7 @@ class AudioEngine:
                 self._wake.clear()
                 now = time.monotonic()
                 applied_submitted_at: float | None = None
+                applied_sim_time_s: float | None = None
                 with self._lock:
                     closing = self._close_requested
                     stopping = self._stop_requested
@@ -541,6 +546,7 @@ class AudioEngine:
                             if source_id not in seen:
                                 live.target_gain = 0.0
                         applied_submitted_at = submitted
+                        applied_sim_time_s = scene.sim_time_s
                         self._set_diagnostic(scene_validity="valid", data_state="current", data_message=None)
                 elif last_received_at is not None and now - last_received_at > _SCENE_STALE_S:
                     # A producer that stops calling update is stale too.  It is
@@ -588,11 +594,17 @@ class AudioEngine:
                 if applied_submitted_at is not None:
                     # This ends after alSourcef/alSource3f have submitted the
                     # new controls.  It is not a device-buffer or acoustic latency.
-                    latency_ms = max(0.0, (time.monotonic() - applied_submitted_at) * 1000.0)
+                    applied_at = time.monotonic()
+                    latency_ms = max(0.0, (applied_at - applied_submitted_at) * 1000.0)
                     latency_samples.append(latency_ms)
                     ordered = sorted(latency_samples)
                     p95 = ordered[min(len(ordered) - 1, int(0.95 * (len(ordered) - 1)))]
-                    self._set_diagnostic(control_apply_latency_ms=round(latency_ms, 3), control_apply_latency_p95_ms=round(p95, 3))
+                    self._set_diagnostic(
+                        control_apply_latency_ms=round(latency_ms, 3),
+                        control_apply_latency_p95_ms=round(p95, 3),
+                        last_applied_sim_time_s=applied_sim_time_s,
+                        last_control_applied_at_s=applied_at,
+                    )
                 if not self._check_al_error(al, "source control"):
                     for live in sources.values():
                         al.alSourceStop(live.source)
