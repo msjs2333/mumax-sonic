@@ -1,7 +1,6 @@
-"""Poll a MuMax3 OVF output series and publish a hash-bound manifest."""
+"""Poll a MuMax3 OVF output series and publish a live manifest."""
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import os
@@ -28,7 +27,6 @@ def _mask_info(path: Path):
     raw = path.read_bytes()
     if len(raw) > 64 * 1024 * 1024:
         raise ValueError("material mask exceeds limit")
-    digest = hashlib.sha256(raw).hexdigest()
     import io
     stream = io.BytesIO(raw)
     version = np.lib.format.read_magic(stream)
@@ -47,7 +45,7 @@ def _mask_info(path: Path):
     np.frombuffer(raw, dtype=np.bool_, count=count, offset=stream.tell()).reshape(
         shape, order="F" if fortran else "C"
     )
-    return {"file": str(path.resolve()), "sha256": digest}, shape
+    return {"file": str(path.resolve())}, shape
 
 
 class MuMax3Bridge:
@@ -80,10 +78,10 @@ class MuMax3Bridge:
         self.time_kind, self.origin = time_kind, origin
         self.z_index, self.pattern = z_index, pattern
         self._mask, self._mask_shape = ("all", None) if all_material else _mask_info(Path(mask_path).resolve())
-        self._manifest_sha = None
+        self._manifest_created = False
         self._seen: dict[Path, tuple[int, int, Any]] = {}
         self._stable: dict[Path, tuple[int, int, int]] = {}
-        self._published: dict[Path, tuple[int, int, str]] = {}
+        self._published: dict[Path, bool] = {}
         self._published_count = 0
         self._geometry = None
         self._unit = None
@@ -124,7 +122,7 @@ class MuMax3Bridge:
             raise ValueError("OVF labels must clearly declare m_x, m_y, m_z")
 
     def _files(self):
-        paths = sorted((p.resolve() for p in self.directory.glob(self.pattern) if p.is_file()), key=lambda p: p.name)
+        paths = sorted((p for p in self.directory.glob(self.pattern)), key=lambda p: p.name)
         indexed = []
         for path in paths:
             match = _SEQUENCE.fullmatch(path.stem)
@@ -141,7 +139,7 @@ class MuMax3Bridge:
         if cached and cached[:2] == signature:
             return cached[2]
         try:
-            field = read_ovf(path)
+            field = read_ovf(path, hash_content=False)
         except ValueError as exc:
             with path.open('rb') as stream:
                 stream.seek(max(0, stat.st_size-256))
@@ -169,17 +167,17 @@ class MuMax3Bridge:
         elif geometry != self._geometry or unit != self._unit:
             raise ValueError("OVF mesh, labels, or units change within one segment")
         # Never retain raw field arrays in the publication bridge.
-        info = SimpleNamespace(sha256=field.sha256, time_s=field.time_s, units=field.units)
+        info = SimpleNamespace(time_s=field.time_s, units=field.units)
         self._seen[path] = (*signature, info)
         return info
 
     def _manifest(self, records):
         frames = []
         for sequence, path, field in records:
-            frames.append({"file": str(path), "sha256": field.sha256, "sequence": sequence,
+            frames.append({"file": str(path), "sequence": sequence,
                            "time_s": field.time_s})
         gaps = [[a[0] + 1, b[0] - 1] for a, b in zip(records, records[1:]) if b[0] > a[0] + 1]
-        return {"schema_version": 1, "entity_id": self.entity_id, "segment_id": self.segment_id,
+        return {"schema_version": 1, "integrity": "unchecked", "entity_id": self.entity_id, "segment_id": self.segment_id,
                 "time_kind": self.time_kind, "origin": self.origin,
                 "quantity": "magnetization_direction", "value_unit": "A/m" if records and records[0][2].units[0] == "A/m" else "1",
                 "components": ["x", "y", "z"], "z_index": self.z_index, "mask": self._mask,
@@ -194,16 +192,14 @@ class MuMax3Bridge:
         try:
             with os.fdopen(fd, "wb") as stream:
                 stream.write(raw); stream.flush(); os.fsync(stream.fileno())
-            if self._manifest_sha is None:
+            if not self._manifest_created:
                 try:
                     os.link(name, self.manifest_path)
                 except FileExistsError:
                     raise FileExistsError("manifest appeared during publication")
             else:
-                if hashlib.sha256(self.manifest_path.read_bytes()).hexdigest() != self._manifest_sha:
-                    raise ValueError('published manifest was modified by another writer')
                 os.replace(name, self.manifest_path)
-            self._manifest_sha = hashlib.sha256(raw).hexdigest()
+            self._manifest_created = True
         finally:
             try: os.unlink(name)
             except FileNotFoundError: pass
@@ -215,13 +211,13 @@ class MuMax3Bridge:
             indexed = self._files()
             if len(indexed) > MAX_FRAMES:
                 raise ValueError("OVF series exceeds 4096 frames")
-            if set(self._published) - {path for _, path in indexed}:
-                raise ValueError('published OVF was removed; start a new segment and manifest')
             # Observe all stat signatures in parallel logical passes, so an
             # already complete N-frame directory needs two polls, not N+1.
-            stats = {path: path.stat() for _, path in indexed}
+            stats = {path: path.stat() for _, path in indexed if path not in self._published}
             unstable = set()
             for _, path in indexed:
+                if path in self._published:
+                    continue
                 stat = stats[path]
                 sig = (stat.st_size, stat.st_mtime_ns)
                 if path not in self._stable or self._stable[path][:2] != sig:
@@ -230,11 +226,11 @@ class MuMax3Bridge:
             pending = []
             records = []
             for sequence, path in indexed:
+                if path in self._published:
+                    records.append((sequence, path, self._seen[path][2]))
+                    continue
                 stat = stats[path]
                 sig = (stat.st_size, stat.st_mtime_ns)
-                old = self._published.get(path)
-                if old and old[:2] != sig:
-                    raise ValueError("published OVF changed after publication")
                 if path in unstable:
                     pending.append(str(path)); break
                 try:
@@ -246,11 +242,10 @@ class MuMax3Bridge:
                 records.append((sequence, path, field))
             if not records:
                 return {"state": "waiting", "reason": "awaiting complete OVF files", "published_frames": self._published_count, "pending_files": pending}
-            meta = self._manifest(records)
             if len(records) > self._published_count:
-                self._publish(meta)
+                self._publish(self._manifest(records))
                 self._published_count = len(records)
-                self._published = {p: (s.st_size, s.st_mtime_ns, f.sha256) for _, p, f in records for s in [p.stat()]}
+                self._published = {p: True for _, p, _ in records}
             return {"state": "waiting" if pending else "current", "reason": "awaiting next complete frame" if pending else None, "published_frames": self._published_count, "pending_files": pending}
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             return {"state": "invalid", "reason": str(exc), "published_frames": self._published_count, "pending_files": []}

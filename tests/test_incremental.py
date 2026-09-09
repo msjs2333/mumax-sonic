@@ -1,7 +1,6 @@
 """Bounded append-only OVF manifest cache behaviour."""
 import json
 
-import numpy as np
 import pytest
 
 from mumax_sonic.sources.incremental import IncrementalOVFReader
@@ -21,7 +20,7 @@ def test_appends_decode_only_new_ovf_bodies(tmp_path, monkeypatch):
     reader = IncrementalOVFReader(retain_frames=2)
     calls = []
     original = ovf_replay.read_ovf
-    monkeypatch.setattr(ovf_replay, 'read_ovf', lambda value: calls.append(value) or original(value))
+    monkeypatch.setattr(ovf_replay, 'read_ovf', lambda value, **kw: calls.append(value) or original(value, **kw))
     assert [f.sequence for f in reader.load(path).frames] == [0, 1]
     assert len(calls) == 2
     assert [f.sequence for f in reader.load(path).frames] == [0, 1]
@@ -47,29 +46,36 @@ def test_eviction_keeps_metadata_for_full_append_prefix(tmp_path):
     assert [frame.sequence for frame in reader.load(path).frames] == [3, 4]
 
 
-def test_historical_change_fails_closed_and_recovery_preserves_state(tmp_path):
+def test_historical_change_is_ignored_without_rereading(tmp_path, monkeypatch):
     path, meta = manifest(tmp_path, count=3)
     reader = IncrementalOVFReader(retain_frames=2)
     good = reader.load(path)
+    reads = []
+    original = ovf_replay.read_ovf
+    monkeypatch.setattr(ovf_replay, 'read_ovf', lambda value, **kw: reads.append(value) or original(value, **kw))
     source = tmp_path / meta['frames'][0]['file']
     raw = source.read_bytes()
     source.write_bytes(raw + b'changed')
-    with pytest.raises(ValueError, match='source changed'):
-        reader.load(path)
+    replay = reader.load(path)
+    assert [frame.sequence for frame in replay.frames] == [1, 2]
+    assert reads == []
     assert [frame.sequence for frame in good.frames] == [1, 2]
-    source.write_bytes(raw)
-    assert [frame.sequence for frame in reader.load(path).frames] == [1, 2]
 
 
-def test_changed_historical_manifest_record_fails_closed(tmp_path):
+def test_historical_hash_change_is_ignored_and_missing_hash_is_realtime_safe(tmp_path):
     path, meta = manifest(tmp_path, count=3)
     reader = IncrementalOVFReader(retain_frames=2)
     reader.load(path)
     changed = json.loads(json.dumps(meta))
     changed['frames'][0]['sha256'] = '0' * 64
     _publish(path, changed)
-    with pytest.raises(ValueError, match='provenance changed'):
-        reader.load(path)
+    assert [frame.sequence for frame in reader.load(path).frames] == [1, 2]
+
+    path, meta = manifest(tmp_path, count=2)
+    for record in meta['frames']:
+        record.pop('sha256')
+    _publish(path, meta)
+    assert [frame.sequence for frame in IncrementalOVFReader(retain_frames=2).load(path).frames] == [0, 1]
 
 
 def test_cross_frame_geometry_and_header_time_regressions_fail_closed(tmp_path):
@@ -77,6 +83,7 @@ def test_cross_frame_geometry_and_header_time_regressions_fail_closed(tmp_path):
     reader = IncrementalOVFReader(retain_frames=2)
     reader.load(path)
     wrong_shape = tmp_path / 'm000002.ovf'
+    import numpy as np
     digest = write_ovf(wrong_shape, np.zeros((1, 4, 4, 3)), 2e-11)
     changed = json.loads(json.dumps(meta))
     changed['frames'].append(dict(file=wrong_shape.name, sha256=digest, sequence=2))

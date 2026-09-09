@@ -4,6 +4,7 @@ import threading
 import numpy as np
 import pytest
 
+import mumax_sonic.sources.mumaxplus as mumaxplus_source
 from mumax_sonic.sources.mumaxplus import MuMaxPlusSampler, probe_mumaxplus
 
 
@@ -54,6 +55,18 @@ def test_capture_preserves_raw_xyz_coordinates_mask_layer_and_provenance():
     info = json.loads(frame.provenance)
     assert info["quantity_semantics"] == "magnetization_direction"
     assert info["raw_shape"] == [3, 2, 3, 4] and info["z_index"] == 1
+    assert {"host_bytes_sha256", "coordinates_sha256", "mask_sha256"}.isdisjoint(info)
+
+
+def test_capture_does_not_hash_arrays(monkeypatch):
+    """Live capture avoids full-array hashing after the required transfer."""
+    import hashlib
+    def forbidden(*args, **kwargs):
+        raise AssertionError('live capture must not hash arrays')
+    monkeypatch.setattr(hashlib, 'sha256', forbidden)
+    world = _World()
+    magnet = _Magnet(_values(), world, np.ones((1,3,4), dtype=bool))
+    assert MuMaxPlusSampler(world, magnet, entity_id='m', segment_id='s').sample(0).sequence == 0
 
 
 def test_layer_mask_and_explicit_mask_requirements_and_custom_vector_shape():

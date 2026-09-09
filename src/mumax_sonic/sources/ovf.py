@@ -36,13 +36,13 @@ class OVFData:
     time_s: float | None
     labels: tuple[str, str, str]
     units: tuple[str, str, str]
-    sha256: str
+    sha256: str | None
     encoding: str
     time_hint: tuple[str, ...] = ()
     byte_count: int = 0
 
 
-def read_ovf(path) -> OVFData:
+def read_ovf(path, *, hash_content=True) -> OVFData:
     """Read a bounded, single-segment rectangular OVF 2.0 vector field."""
     source = Path(path)
     try:
@@ -59,7 +59,7 @@ def read_ovf(path) -> OVFData:
     if len(raw) > MAX_FILE_BYTES:
         raise ValueError("OVF exceeds 64 MiB file limit")
 
-    digest = hashlib.sha256(raw).hexdigest()
+    digest = hashlib.sha256(raw).hexdigest() if hash_content else None
     pos, first = _next_record(raw, 0)
     if _normal(_comment(first)) != "oommf ovf 2.0":
         raise ValueError("only OOMMF OVF 2.0 is supported")

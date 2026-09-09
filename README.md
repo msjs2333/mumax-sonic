@@ -6,6 +6,8 @@
 
 P3d 已加入持续运行、真实成对开销基准与故障恢复测试。首批测量发现竞争负载和批量追赶可能超过延迟预算，性能目标尚未全部通过，见 [P3d 验证记录](docs/p3d-validation.md)。
 
+实时只读路径默认信任生产端：不计算逐帧内容哈希、不审计历史文件，仅增量处理新帧；保留时间、单位、网格与半写文件检查。见 [读取简化与复测](docs/p3d-reader-validation.md)。
+
 ```powershell
 python launch.py --backend-info
 python scripts/run_mumaxplus_live.py --frames 60

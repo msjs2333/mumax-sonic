@@ -65,10 +65,18 @@ def load_ovf_replay(path):
 
 
 def _load_ovf_manifest(path, meta, raw=None):
+    if raw is None:
+        raw = json.dumps(meta, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    verify = not isinstance(meta, dict) or meta.get('integrity') != 'unchecked'
+    return FieldReplay(tuple(_iter_ovf_manifest(path, meta, raw, verify_hashes=verify)),
+                       hashlib.sha256(raw).hexdigest() if verify else '')
+
+
+def _iter_ovf_manifest(path, meta, raw, *, cumulative_limit=True, verify_hashes=True):
     """Validate already-read manifest metadata and decode its declared frames.
 
-    This internal entry point lets a follower apply exactly the offline OVF
-    validation to a newly appended record without reading historical bodies.
+    Live callers share physical parsing while skipping content auditing and
+    retaining only a bounded tail of the yielded frames.
     """
     path = Path(path)
     if raw is None:
@@ -102,13 +110,13 @@ def _load_ovf_manifest(path, meta, raw=None):
     mask = None
     mask_identity = 'all grid sites explicitly declared material'
     if mask_spec != 'all':
-        if not isinstance(mask_spec, dict) or set(mask_spec) != {'file', 'sha256'}:
+        if not isinstance(mask_spec, dict) or 'file' not in mask_spec or (verify_hashes and set(mask_spec) != {'file', 'sha256'}):
             raise ValueError('mask must be "all" or a hash-bound boolean NPY file')
         mask_path = _path(path.parent, mask_spec['file'])
         if mask_path.stat().st_size > MAX_BYTES:
             raise ValueError('mask exceeds prototype memory limit')
         mask_raw = _bounded_bytes(mask_path, MAX_BYTES)
-        mask_identity = _hash(mask_raw, mask_spec['sha256'], 'mask')
+        mask_identity = _hash(mask_raw, mask_spec['sha256'], 'mask') if verify_hashes else str(mask_path)
         import io
         stream = io.BytesIO(mask_raw)
         version = np.lib.format.read_magic(stream)
@@ -124,34 +132,40 @@ def _load_ovf_manifest(path, meta, raw=None):
         if count > MAX_BYTES or len(mask_raw)-stream.tell() != count:
             raise ValueError('material mask payload size disagrees with header')
         mask = np.frombuffer(mask_raw, dtype=np.bool_, count=count, offset=stream.tell()).reshape(shape, order='F' if fortran else 'C')
-    manifest_hash = hashlib.sha256(raw).hexdigest()
+    manifest_hash = hashlib.sha256(raw).hexdigest() if verify_hashes else None
     time_evidence = meta.get('time_evidence')
     evidence_identity = None
-    if time_evidence is not None:
+    if time_evidence is not None and verify_hashes:
         if not isinstance(time_evidence, dict) or not isinstance(time_evidence.get('description'), str) or not time_evidence['description'].strip():
             raise ValueError('time evidence requires a description and hash-bound file')
         evidence_path = _path(path.parent, time_evidence.get('file'))
         if evidence_path.stat().st_size > 8*1024*1024:
             raise ValueError('time evidence exceeds 8 MiB')
         evidence_identity = _hash(_bounded_bytes(evidence_path,8*1024*1024), time_evidence.get('sha256'), 'time evidence')
-    frames, seen = [], set()
+    seen = set()
     total_bytes = decoded_bytes = 0
     geometry = None
     for record in records:
+        if not cumulative_limit:
+            # Live callers retain a bounded tail and enforce its own budget.
+            # Per-frame limits remain; a whole segment need not fit in RAM.
+            total_bytes = decoded_bytes = 0
         if not isinstance(record, dict):
             raise ValueError('frame record must be an object')
-        source = _path(path.parent, record.get('file')).resolve()
+        source = _path(path.parent, record.get('file'))
+        if verify_hashes:
+            source = source.resolve()
         if source in seen:
             raise ValueError('duplicate OVF file in manifest')
         seen.add(source)
         sequence = _integer(record.get('sequence'), 'sequence')
         if total_bytes + source.stat().st_size > MAX_BYTES:
             raise ValueError('OVF sequence exceeds 256 MiB input limit')
-        field = read_ovf(source)
+        field = read_ovf(source) if verify_hashes else read_ovf(source, hash_content=False)
         total_bytes += field.byte_count
         if total_bytes > MAX_BYTES:
             raise ValueError('OVF sequence exceeds 256 MiB input limit')
-        if not isinstance(record.get('sha256'), str) or field.sha256 != record['sha256'].lower():
+        if verify_hashes and (not isinstance(record.get('sha256'), str) or field.sha256 != record['sha256'].lower()):
             raise ValueError('OVF SHA256 mismatch or missing hash')
         if tuple(field.units) != (unit,)*3:
             raise ValueError('OVF value units disagree with manifest')
@@ -201,12 +215,11 @@ def _load_ovf_manifest(path, meta, raw=None):
             mask_source=mask_identity, time_source=time_source, encoding=field.encoding,
             header_time_s=field.time_s, header_time_hint=list(getattr(field, 'time_hint', ())),
             time_evidence_sha256=evidence_identity,
-            time_evidence_description=time_evidence['description'] if time_evidence else None,
+            time_evidence_description=time_evidence.get('description') if isinstance(time_evidence, dict) else None,
             sequence_source=meta.get('sequence_source', 'explicit manifest records')), ensure_ascii=False)
         origin = (field.origin_m[0], field.origin_m[1], field.origin_m[2]+layer*field.step_m[2])
-        frames.append(FieldFrame(vectors, field.step_m[0], field.step_m[1], time_s, origin,
-            selected_mask, meta['entity_id'], 'replay', meta['segment_id'], sequence, meta['time_kind'], provenance))
-    return FieldReplay(tuple(frames), manifest_hash)
+        yield FieldFrame(vectors, field.step_m[0], field.step_m[1], time_s, origin,
+            selected_mask, meta['entity_id'], 'replay', meta['segment_id'], sequence, meta['time_kind'], provenance)
 
 
 def load_field_replay(path):

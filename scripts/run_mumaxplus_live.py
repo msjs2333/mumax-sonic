@@ -57,7 +57,7 @@ def main():
             report.update(last_physical_time_s=frame.sim_time_s,
                 capture_median_ms=float(np.median(captures)),
                 solver_step_median_ms=float(np.median(solves)) if solves else None,
-                final_source_sha256=json.loads(frame.provenance)['host_bytes_sha256'])
+                final_source_sha256=None)
             if not stop.is_set():
                 stream.finish()
         except Exception as exc:

@@ -7,7 +7,6 @@ thread.
 """
 from __future__ import annotations
 
-import hashlib
 import importlib
 import json
 import threading
@@ -49,10 +48,6 @@ def probe_mumaxplus() -> dict:
             "gpu_usable": None,
         },
     }
-
-
-def _sha256(array: np.ndarray) -> str:
-    return hashlib.sha256(np.ascontiguousarray(array).tobytes()).hexdigest()
 
 
 def _layer_mask(mask: Any, shape: tuple[int, int, int], z_index: int) -> np.ndarray:
@@ -157,8 +152,7 @@ class MuMaxPlusSampler:
             "entity_id": self.entity_id, "segment_id": self.segment_id,
             "quantity": quantity_name, "quantity_semantics": self.quantity_semantics,
             "raw_shape": list(raw.shape), "z_index": z_index,
-            "host_bytes_sha256": _sha256(raw), "coordinates_sha256": _sha256(coordinates),
-            "mask_sha256": _sha256(material_mask), "sim_time_s": before_time,
+            "sim_time_s": before_time,
             "transfer_and_geometry_ms": self.last_capture_ms,
         }, sort_keys=True)
         frame = FieldFrame(vectors, cellsize[0], cellsize[1], before_time, origin, material_mask,

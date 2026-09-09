@@ -54,13 +54,13 @@ def test_half_written_stable_file_waits_and_missing_time_is_visible(tmp_path):
         bridge.close()
 
 
-def test_published_mutation_and_existing_manifest_fail_closed(tmp_path):
+def test_published_history_is_trusted_and_existing_output_is_not_overwritten(tmp_path):
     path = tmp_path / "out"; path.mkdir(); (path / "m000.ovf").write_bytes(_ovf())
     bridge = _bridge(tmp_path)
     bridge.poll(); bridge.poll()
     (path / "m000.ovf").write_bytes(_ovf(values=np.ones(12)))
     try:
-        assert bridge.poll()["state"] == "invalid"
+        assert bridge.poll()["state"] == "current"
     finally:
         bridge.close()
     with pytest.raises(FileExistsError):
@@ -89,3 +89,21 @@ def test_partial_file_finishes_without_restarting_bridge(tmp_path):
         bridge.poll(); assert bridge.poll()['state']=='waiting'
         source.write_bytes(_ovf())
         bridge.poll(); assert bridge.poll()['published_frames']==1
+
+
+def test_live_bridge_and_import_work_without_content_hashing(tmp_path, monkeypatch):
+    import hashlib
+    from test_ovf_replay import manifest
+    from mumax_sonic.sources.ovf_replay import load_ovf_replay
+    source = tmp_path/'out'
+    source.mkdir()
+    manifest(source, count=2)
+    def forbidden(*args, **kwargs):
+        raise AssertionError('live bridge must not hash content')
+    monkeypatch.setattr(hashlib, 'sha256', forbidden)
+    with _bridge(tmp_path) as bridge:
+        bridge.poll()
+        assert bridge.poll()['published_frames'] == 2
+        replay = load_ovf_replay(tmp_path/'manifest.json')
+        assert replay.frames[-1].sequence == 1
+        assert replay.sha256 == ''

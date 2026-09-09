@@ -1,5 +1,4 @@
 """Worker-only live OVF manifest following behaviour."""
-import hashlib
 import json
 import time
 
@@ -59,15 +58,17 @@ def test_partial_and_corrupt_publication_preserve_good_view_then_recover(tmp_pat
         recovered = _wait(follower, 'current')
         assert recovered['view'] is good['view']
         changed = json.loads(json.dumps(meta))
-        changed['frames'][0]['sha256'] = '0' * 64
+        for record in changed['frames']:
+            record.pop('sha256', None)
         _publish(path, changed)
-        bad = _wait(follower, 'invalid')
-        assert bad['view'] is good['view']
+        current = _wait(follower, 'current')
+        assert current['updates'] == 1
+        assert current['view'] is good['view']
     finally:
         follower.close()
 
 
-def test_rewritten_published_frame_fails_closed_and_preserves_physical_metadata(tmp_path):
+def test_rewritten_published_frame_does_not_reset_staleness_or_updates(tmp_path):
     path, meta = manifest(tmp_path, count=2)
     follower = LiveFollower(path, LiveConfig(poll_interval_s=.01, stale_after_s=.5, recipe='activity')).start()
     try:
@@ -81,11 +82,12 @@ def test_rewritten_published_frame_fails_closed_and_preserves_physical_metadata(
         raw[end - 1] ^= 1  # alter a final vector byte while retaining OVF syntax
         raw = bytes(raw)
         source.write_bytes(raw)
-        rewritten['frames'][1]['sha256'] = hashlib.sha256(raw).hexdigest()
         _publish(path, rewritten)
-        invalid = _wait(follower, 'invalid')
-        assert invalid['view'] is good['view']
-        assert 'provenance changed' in invalid['last_error']
+        current = _wait(follower, 'current')
+        assert current['view'] is good['view']
+        assert current['updates'] == 1
+        stale = _wait(follower, 'stale')
+        assert stale['updates'] == 1
     finally:
         follower.close()
 
