@@ -211,6 +211,6 @@ def field_selection_report(view, report):
     for channel, values in aggregation['channels'].items():
         before = values['input']
         selected = sum(g[channel]['selected'] or 0.0 for g in report['groups'])
-        fractions[channel] = min(1.0, max(0.0, selected/before)) if before is not None and before > 0 else None
+        fractions[channel] = min(1.0, max(0.0, selected/before)) if report['validity'] == 'valid' and before is not None and before > 0 else None
     result['selected_fraction_observer_input'] = fractions
     return result

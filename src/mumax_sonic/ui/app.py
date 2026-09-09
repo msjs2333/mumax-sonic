@@ -90,6 +90,12 @@ class SonicApp:
         from .aggregation_worker import LatestAggregation
         self._aggregation_worker = LatestAggregation()
         self._aggregation_base = None
+        self._aggregation_completed_at = 0.0
+        self.live_follower = None
+        self.live_path = None
+        self.live_stale_s = 2.0
+        self.live_snapshot = None
+        self._live_settings = None
         self.selection_note = tk.StringVar()
         self._labels = {v: k for k, v in SCENARIOS.items()}
         self._labels.update({v: k for k, v in FIELD_SCENARIOS.items()})
@@ -283,6 +289,9 @@ class SonicApp:
         self.status.set("已静音 · 点击“开始试听 / 重连”恢复")
 
     def toggle_play(self):
+        if self._labels[self.scenario.get()] == 'live':
+            self.status.set('实时跟随由发布端推进；可使用静音停止探听')
+            return
         self.transport.playing = not self.transport.playing
         self._last_tick = time.monotonic()
         self.play_button.configure(text="暂停" if self.transport.playing else "播放")
@@ -301,6 +310,9 @@ class SonicApp:
         self._last_tick = time.monotonic()
 
     def seek_to(self, value):
+        if self._labels[self.scenario.get()] == 'live':
+            self.status.set('实时跟随不支持跳转；请加载清单为回放')
+            return
         if not math.isfinite(value) or value < 0:
             raise ValueError('跳转时间必须有限且非负')
         if self.replay and self._labels[self.scenario.get()] == 'replay':
@@ -416,6 +428,30 @@ class SonicApp:
             self._field_key = key
         return self._field_cache
 
+    def follow_live(self, path, stale_after_s=2.0):
+        self.live_path = Path(path)
+        self.live_stale_s = stale_after_s
+        self._labels['实时 · OVF 发布清单'] = 'live'
+        self.scenario_combo.configure(values=list(self._labels))
+        self.scenario.set('实时 · OVF 发布清单')
+        self.transport.playing = False
+        self._live_settings = None
+
+    def _poll_live(self):
+        from ..sources.live import LiveConfig, LiveFollower
+        recipe = {'活动': 'activity', '频带': 'band'}.get(self.replay_recipe.get(), 'topology')
+        settings = (self.live_path, recipe, self.max_dt_s, self.band_config, self.live_stale_s)
+        if settings != self._live_settings:
+            if self.live_follower is not None:
+                self.live_follower.close()
+            self.live_follower = LiveFollower(self.live_path, LiveConfig(recipe=recipe,
+                max_dt_s=self.max_dt_s, band_config=self.band_config, stale_after_s=self.live_stale_s))
+            self.live_follower.start()
+            self._live_settings = settings
+            self._aggregation_base = None
+        self.live_snapshot = self.live_follower.snapshot()
+        return self.live_snapshot
+
     def bounds(self):
         return (35, 28, max(100, self.canvas.winfo_width()-35), max(100, self.canvas.winfo_height()-34))
 
@@ -506,7 +542,20 @@ class SonicApp:
             self.audio_ready = ok and not self._mute_requested
             self.status.set(("已静音" if self._mute_requested else "音频已开启") if ok else f"无法开启音频：{error}")
         scenario = self._labels[self.scenario.get()]
-        if scenario.startswith('field:') or scenario == 'replay':
+        if scenario == 'live':
+            from dataclasses import replace
+            from ..model import Sample
+            snapshot = self._poll_live()
+            self.field_view = snapshot['view']
+            validity = {'waiting': 'warming_up', 'stale': 'stale', 'invalid': 'invalid', 'closed': 'stale'}.get(snapshot['state'])
+            if self.field_view is not None:
+                if validity:
+                    self.field_view = replace(self.field_view, sample=replace(self.field_view.sample, validity=validity))
+                self.sample = self.field_view.sample
+            else:
+                self.sample = Sample(0, (), validity=validity or 'warming_up', source_kind='live')
+            self.transport.playing = False
+        elif scenario.startswith('field:') or scenario == 'replay':
             try:
                 self.field_view = self._get_field_view(scenario)
                 self.sample = self.field_view.sample
@@ -525,7 +574,8 @@ class SonicApp:
         aggregation_pending = False
         if self.field_view is not None:
             from ..field_pipeline import apply_aggregation
-            key = (id(self.field_view), attention, self.source_budget.get(), self.aggregation_mode.get())
+            key = (id(self.field_view), attention, self.source_budget.get(), self.aggregation_mode.get(),
+                   self._live_settings if scenario == 'live' else None)
             base = self.field_view
             adaptive = (self.aggregation_mode.get() == 'adaptive' and base.contributions is not None
                         and base.sample.validity == 'valid' and base.sample.coverage == 1
@@ -535,14 +585,25 @@ class SonicApp:
                 completed = self._aggregation_worker.poll()
                 if completed is not None:
                     done_key, done_view, error = completed
-                    if done_key[0] == id(base) and done_key[2:] == key[2:]:
+                    live_match = (scenario == 'live' and done_view is not None
+                        and done_view.field.segment_id == base.field.segment_id
+                        and done_view.field.entity_id == base.field.entity_id
+                        and done_view.field.sequence <= base.field.sequence)
+                    if (done_key[0] == id(base) or live_match) and done_key[2:] == key[2:]:
                         if error is None:
-                            self._aggregation_base = base
+                            self._aggregation_base = base if done_key[0] == id(base) else done_view
                             self._aggregation_key, self._aggregation_view = done_key, done_view
+                            self._aggregation_completed_at = now
                         else:
                             self.status.set(f'空间聚合失败：{error}')
                 compatible = (self._aggregation_base is base and self._aggregation_key is not None
                               and self._aggregation_key[2:] == key[2:])
+                if scenario == 'live' and self._aggregation_base is not None and self._aggregation_key is not None:
+                    old = self._aggregation_base
+                    compatible = (self._aggregation_key[2:] == key[2:]
+                        and old.field.segment_id == base.field.segment_id and old.field.entity_id == base.field.entity_id
+                        and old.diagnostic['recipe'] == base.diagnostic['recipe']
+                        and now-self._aggregation_completed_at < self.live_stale_s)
                 if compatible:
                     self.field_view = self._aggregation_view
                     attention = self._aggregation_key[1]
@@ -616,6 +677,12 @@ class SonicApp:
             self.legend.set(f'绿色 + / 紫色 −\n位置表示方位，音色表示符号\n最多 {self.source_budget.get()} 路 · 单路增益含 1/预算')
         if aggregation_pending:
             self.data_note.set(self.data_note.get() + ' · 空间聚合更新中，声音使用上次完成的关注区域')
+        if scenario == 'live':
+            snapshot = self.live_snapshot
+            age = '—' if snapshot['age_s'] is None else f"{snapshot['age_s']:.2f}s"
+            self.data_note.set(f"实时 {snapshot['state']} · 最新帧年龄 {age} · 已更新 {snapshot['updates']} 次 · {snapshot['reason']}"
+                + (' · 聚合追赶中' if aggregation_pending else ''))
+            self.play_button.configure(text='实时跟随')
         self._draw(draw_attention)
         self.table.delete(*self.table.get_children())
         self.table.heading('strength', text='贡献 / rad/s' if is_activity else ('均方贡献' if is_band else '原始强度'))
@@ -640,11 +707,15 @@ class SonicApp:
                                field=self.field_view.diagnostic)
             payload.update(playback_rate=self.transport.playback_rate, activity_reference_rad_s=self.activity_reference,
                            activity_max_dt_s=self.max_dt_s, band_reference=self.band_reference, selection=self.selection_report, source_budget=self.source_budget.get())
+            if self._labels[self.scenario.get()] == 'live' and self.live_snapshot:
+                payload['live'] = {k: v for k, v in self.live_snapshot.items() if k != 'view'}
             Path(filename).write_text(report_json(payload), encoding="utf-8")
 
     def close(self):
         self.closing = True
         self._aggregation_worker.close()
+        if self.live_follower is not None:
+            self.live_follower.close()
         if self._tick_id:
             self.window.after_cancel(self._tick_id)
         if self.engine and not self.opening:
@@ -652,7 +723,7 @@ class SonicApp:
         self.window.destroy()
 
 
-def run(no_audio=False, dll_path=None, field_demo=None, replay_path=None, recipe='topology', max_dt_s=None, activity_reference=1e9, band_config=None, band_reference=0.005, source_budget=4, aggregation='fixed'):
+def run(no_audio=False, dll_path=None, field_demo=None, replay_path=None, recipe='topology', max_dt_s=None, activity_reference=1e9, band_config=None, band_reference=0.005, source_budget=4, aggregation='fixed', follow_path=None, live_stale_s=2.0):
     configure_dpi()
     root = tk.Tk()
     app = SonicApp(root, no_audio=no_audio, dll_path=dll_path)
@@ -679,6 +750,8 @@ def run(no_audio=False, dll_path=None, field_demo=None, replay_path=None, recipe
         app.scenario_combo.configure(values=list(app._labels))
         app.scenario.set('回放 · 三分量场')
         app.reset()
+    if follow_path:
+        app.follow_live(follow_path, live_stale_s)
     root.mainloop()
 
 

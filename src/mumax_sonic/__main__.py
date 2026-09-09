@@ -30,7 +30,13 @@ def main():
     from .model import MAX_SOURCE_BUDGET
     parser.add_argument('--source-budget', type=int, default=4, choices=range(1, MAX_SOURCE_BUDGET+1), help='Maximum spatial voices; default 4, gain headroom uses 1/budget')
     parser.add_argument('--aggregation', choices=['fixed', 'adaptive'], default='fixed', help='Spatial contribution grouping')
+    parser.add_argument('--follow', type=Path, help='Follow atomically published OVF JSON snapshots in the GUI')
+    parser.add_argument('--live-stale-s', type=float, default=2.0, help='Mute live data after this wall-clock age without a new physical frame')
     args = parser.parse_args()
+    if not math.isfinite(args.live_stale_s) or args.live_stale_s <= 0:
+        parser.error('--live-stale-s must be finite and positive')
+    if args.follow and (args.replay or args.inspect_field or args.field_demo or args.doctor or args.audio_smoke is not None):
+        parser.error('--follow is a separate GUI source; do not combine with replay/demo/inspection/device checks')
     band_config = None
     if args.recipe == 'band' or (args.field_demo and args.field_demo.startswith('band_')) or not (args.doctor or args.audio_smoke is not None):
         from .observers.band import BandConfig
@@ -145,7 +151,7 @@ def main():
     else:
         from .ui.app import run
         run(no_audio=args.no_audio, dll_path=args.dll, field_demo=args.field_demo, replay_path=args.replay,
-            recipe=args.recipe, max_dt_s=max_dt_s, activity_reference=args.activity_reference_rad_s, band_config=band_config, band_reference=args.band_reference, source_budget=args.source_budget, aggregation=args.aggregation)
+            recipe=args.recipe, max_dt_s=max_dt_s, activity_reference=args.activity_reference_rad_s, band_config=band_config, band_reference=args.band_reference, source_budget=args.source_budget, aggregation=args.aggregation, follow_path=args.follow, live_stale_s=args.live_stale_s)
 
 
 if __name__ == "__main__":

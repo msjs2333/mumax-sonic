@@ -2,7 +2,16 @@
 
 面向微磁与相关磁性连续场仿真的空间可听化工具：用可解释的声音辅助感知状态、运动、频带活动与拓扑结构，并通过可调关注区域分配听觉注意力。
 
-**状态：P2f 自适应聚合与背景汇总已实现。** 拓扑正负、活动和频带贡献先逐位置计算，再按关注区域分配 1–16 路声源。固定分块仍为默认，可切换对比；空间误差与贡献覆盖分别报告。见 [P2f 实现与验证](docs/p2f-validation.md)。
+**状态：P3a 已实现 OVF 发布清单后台跟随。** 读取和物理观察在后台进行，支持等待、有效、失效静音与恢复，保留自适应聚合。尚未接入 MuMax+ 求解器直接采样。见 [P3a 验证记录](docs/p3a-validation.md)。
+
+在两个终端分别运行（发布目录须为空；可先启动跟随窗口）：
+
+```powershell
+python launch.py --follow local/live-demo/live.json --recipe activity --aggregation adaptive --source-budget 8
+python scripts/publish_live_demo.py local/live-demo --frames 60 --interval-s 0.1
+```
+
+该发布端是 CPU 合成场演示。点击窗口“试听 / 重连”开启声音；发布结束后默认 2 秒没有新物理帧即失效静音，可用 `--live-stale-s` 明确调整。清单中的仿真时间与发布间隔分别处理，不以文件写入时间推算频率。
 
 ```powershell
 python launch.py --field-demo opposite_pair --aggregation adaptive --source-budget 4

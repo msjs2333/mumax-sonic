@@ -291,3 +291,57 @@ def test_slow_aggregation_does_not_block_roi_or_apply_old_scene(app, monkeypatch
         release.set()
     app._tick()
     assert app.sample.validity == 'invalid'
+
+
+from dataclasses import replace
+from mumax_sonic.field_pipeline import observe_field
+from mumax_sonic.sources.activity_demo import make_activity_frame
+
+
+def test_live_quality_stales_and_recovers_without_advancing_physical_time(app):
+    old = make_activity_frame('activity_rotation', 1)
+    current = make_activity_frame('activity_rotation', 2)
+    view = observe_field(replace(current, source_kind='live'), 'activity', previous=replace(old, source_kind='live'))
+    state = dict(view=view, state='current', reason='new frame', age_s=.1, updates=1,
+                 last_error=None, processing_ms=1)
+    def poll():
+        app.live_snapshot = dict(state)
+        return app.live_snapshot
+    app.follow_live('unused.json')
+    app._poll_live = poll
+    app._tick()
+    assert app.sample.sim_time_s == current.sim_time_s
+    assert app.scene.sources
+    assert app.sample.source_kind == 'live'
+    state.update(state='stale', age_s=3)
+    app._tick()
+    assert app.sample.validity == 'stale'
+    assert not app.scene.sources
+    assert app.selection_report['selected_fraction_observer_input']['absolute'] is None
+    assert app.sample.sim_time_s == current.sim_time_s
+    state.update(state='invalid', reason='SHA256 mismatch')
+    app._tick()
+    assert not app.scene.sources
+    assert 'SHA256' in app.data_note.get()
+    state.update(state='current', age_s=.1)
+    app._tick()
+    assert app.scene.sources
+    app.toggle_play()
+    assert not app.transport.playing
+    app.seek_to(1)
+    assert app.sample.sim_time_s == current.sim_time_s
+
+
+def test_live_waiting_has_no_fake_zero_measurement(app):
+    app.follow_live('missing.json')
+    state = dict(view=None, state='waiting', reason='waiting for publication', age_s=None,
+                 updates=0, last_error=None, processing_ms=None)
+    def poll():
+        app.live_snapshot = state
+        return state
+    app._poll_live = poll
+    app._tick()
+    assert app.sample.validity == 'warming_up'
+    assert app.sample.source_kind == 'live'
+    assert not app.scene.sources
+    assert app.selection_report['validity'] == 'warming_up'
