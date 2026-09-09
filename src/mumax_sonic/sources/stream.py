@@ -19,6 +19,8 @@ class FrameStream:
         self._pending = deque()
         self._thread = None
         self._closed = False
+        self._finished = False
+        self._processing = False
         self._generation = 0
         self._identity = None
         self._last_sequence = self._last_time = None
@@ -51,6 +53,8 @@ class FrameStream:
         with self._condition:
             if self._closed:
                 raise RuntimeError('stream is closed')
+            if self._finished:
+                raise RuntimeError('stream is finished')
             if identity != self._identity:
                 self._generation += 1
                 self._pending.clear()
@@ -67,6 +71,11 @@ class FrameStream:
             self._pending.append((frame, time.monotonic(), self._generation))
             self._condition.notify()
 
+    def finish(self):
+        """Declare normal producer completion; retain and drain accepted frames."""
+        with self._condition:
+            self._finished = True
+
     def fail(self, error):
         """Expose a producer/solver failure and invalidate queued output."""
         with self._condition:
@@ -82,6 +91,8 @@ class FrameStream:
             state, reason = self._state, self._reason
             if state == 'current' and age is not None and age >= self.config.stale_after_s:
                 state, reason = 'stale', 'captured result exceeded freshness deadline'
+            if self._finished and not self._pending and not self._processing and state in ('waiting', 'current', 'stale'):
+                state, reason = 'finished', '采样已结束，物理声源静音；保留最后一帧供查看'
             return dict(view=self._view, state=state, reason=reason, age_s=age, updates=self._updates,
                 dropped_frames=self._dropped, skipped_observation_frames=self._skipped,
                 pending_frames=len(self._pending), processing_ms=self._processing_ms, last_error=self._last_error)
@@ -104,6 +115,7 @@ class FrameStream:
                     return
                 batch = tuple(self._pending)
                 self._pending.clear()
+                self._processing = True
             started = time.monotonic()
             frame, received, job_generation = batch[-1]
             if job_generation != generation:
@@ -119,6 +131,7 @@ class FrameStream:
             except Exception as exc:
                 view, error = None, str(exc)
             with self._condition:
+                self._processing = False
                 if self._closed:
                     return
                 if job_generation != self._generation:

@@ -40,7 +40,7 @@ def main():
             magnet.magnetization=(1,0,0)
             world.bias_magnetic_field=(0,0,.1)
             sampler = MuMaxPlusSampler(world, magnet, entity_id='m', segment_id='uniform-precession')
-            captures=[]; solves=[]
+            captures=[]; solves=[]; frame=None
             for sequence in range(args.frames):
                 if stop.is_set():
                     break
@@ -52,10 +52,14 @@ def main():
                 stream.submit(frame)
                 stop.wait(args.interval_s)
             import numpy as np
+            if frame is None:
+                return
             report.update(last_physical_time_s=frame.sim_time_s,
                 capture_median_ms=float(np.median(captures)),
                 solver_step_median_ms=float(np.median(solves)) if solves else None,
                 final_source_sha256=json.loads(frame.provenance)['host_bytes_sha256'])
+            if not stop.is_set():
+                stream.finish()
         except Exception as exc:
             report['error']=str(exc)
             stream.fail(exc)

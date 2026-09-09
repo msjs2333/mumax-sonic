@@ -330,6 +330,14 @@ def test_live_quality_stales_and_recovers_without_advancing_physical_time(app):
     assert not app.transport.playing
     app.seek_to(1)
     assert app.sample.sim_time_s == current.sim_time_s
+    state.update(state='finished', reason='采样已结束，物理声源静音')
+    app._tick()
+    assert not app.scene.sources
+    assert app.sample.sim_time_s == current.sim_time_s
+    assert '采样已结束' in app.data_note.get()
+    texts = [app.canvas.itemcget(item, 'text') for item in app.canvas.find_all()
+             if app.canvas.type(item) == 'text']
+    assert '采样已结束\n物理声源静音' in texts
 
 
 def test_live_waiting_has_no_fake_zero_measurement(app):

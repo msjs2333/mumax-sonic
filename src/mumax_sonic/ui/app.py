@@ -557,7 +557,9 @@ class SonicApp:
             if o.orientation_enabled or self.field_view is None:
                 c.create_line(px, py, px+radius*math.cos(a), py-radius*math.sin(a), fill=color, arrow="last")
         if self.sample.validity != "valid":
-            c.create_text((left+right)/2, (top+bottom)/2, text=f"数据状态：{self.sample.validity}\n物理声源静音", fill="#ffc092", font=("Microsoft YaHei UI", 16, "bold"))
+            finished = self.sample.source_kind == 'live' and self.live_snapshot and self.live_snapshot['state'] == 'finished'
+            message = "采样已结束\n物理声源静音" if finished else f"数据状态：{self.sample.validity}\n物理声源静音"
+            c.create_text((left+right)/2, (top+bottom)/2, text=message, fill="#ffc092", font=("Microsoft YaHei UI", 16, "bold"))
 
     def _tick(self):
         if self.closing:
@@ -581,7 +583,7 @@ class SonicApp:
             from ..model import Sample
             snapshot = self._poll_live()
             self.field_view = snapshot['view']
-            validity = {'waiting': 'warming_up', 'stale': 'stale', 'invalid': 'invalid', 'closed': 'stale'}.get(snapshot['state'])
+            validity = {'waiting': 'warming_up', 'stale': 'stale', 'invalid': 'invalid', 'closed': 'stale', 'finished': 'stale'}.get(snapshot['state'])
             if self.field_view is not None:
                 if validity:
                     self.field_view = replace(self.field_view, sample=replace(self.field_view.sample, validity=validity))

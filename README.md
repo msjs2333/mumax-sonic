@@ -10,6 +10,7 @@ python scripts/run_mumaxplus_live.py --frames 60
 ```
 
 第二条命令会运行真实 MuMax+ 16×16 小网格示例并打开窗口，需可用的 MuMax+ 和 CUDA。点击“试听 / 重连”开启声音。
+60 帧仅持续约几秒；正常结束后显示“采样已结束”并静音，保留末帧。较长试听可用 `python scripts/run_mumaxplus_live.py --frames 1200 --interval-s 0.1`。未声明结束却超过 2 秒没有新结果时，仍显示 `stale`。
 
 MuMax3 输出使用两个终端桥接与探听，材料域必须与仿真一致（非全材料时改用 `--mask`）：
 

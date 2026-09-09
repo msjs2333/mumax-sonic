@@ -57,3 +57,25 @@ def test_memory_budget_and_source_regression_are_explicit():
     with pytest.raises(ValueError, match='increase'):
         stream.submit(frame)
     stream.close()
+
+
+def test_finish_drains_last_frame_and_does_not_hide_failures():
+    stream = FrameStream(LiveConfig(recipe='activity'))
+    stream.submit(make_activity_frame('activity_rotation', 0))
+    stream.submit(make_activity_frame('activity_rotation', 1))
+    stream.finish()
+    assert stream.snapshot()['state'] != 'finished'
+    with pytest.raises(RuntimeError, match='finished'):
+        stream.submit(make_activity_frame('activity_rotation', 2))
+    stream.start()
+    try:
+        result = wait(stream, lambda s: s['state'] == 'finished')
+        assert result['view'].sample.sequence == 1
+        assert result['view'].sample.sim_time_s == 50e-12
+        assert result['view'].sample.validity == 'valid'
+        stream.fail('capture failed')
+        stream.finish()
+        assert stream.snapshot()['state'] == 'invalid'
+    finally:
+        stream.close()
+    assert stream.snapshot()['state'] == 'closed'
