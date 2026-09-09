@@ -17,7 +17,9 @@ from ..sources.synthetic import SCENARIOS, make_sample
 FIELD_SCENARIOS = {'field:skyrmion': '拓扑 · 解析单纹理', 'field:opposite_pair': '拓扑 · 正负净零双纹理',
                    'field:uniform': '拓扑 · 均匀场', 'field:wall_inplane': '取向 · 面内域轴',
                    'field:wall_pma': '取向 · 面外域轴',
-                   'field:activity_rotation': '活动 · 均匀旋转', 'field:activity_localized': '活动 · 局域旋转'}
+                   'field:activity_rotation': '活动 · 均匀旋转', 'field:activity_localized': '活动 · 局域旋转',
+                   'field:band_in': '频带 · 带内 10 GHz', 'field:band_out': '频带 · 带外 30 GHz',
+                   'field:band_opposite': '频带 · 空间反相', 'field:band_mixed': '频带 · 带内外分区'}
 
 ACTIVITY_REASONS = {
     'no previous physical frame': '等待前一物理帧，不能把首帧当作零活动',
@@ -28,6 +30,16 @@ ACTIVITY_REASONS = {
     'not every material site has a valid vector pair': '存在无效矢量对，覆盖不足，声音静音',
     'field segment changed': '仿真阶段变化，等待同阶段相邻帧',
     'material mask changed': '材料区域变化，等待新的相邻帧',
+}
+
+BAND_REASONS = {
+    'full contiguous dynamic window analyzed': '完整历史窗已计算',
+    'need a full contiguous physical window': '等待连续历史；缺帧或阶段变化后重新预热',
+    'band power requires dynamic field frames': '静态或松弛数据不计算物理频谱',
+    'band upper edge must be strictly below Nyquist': '上限须低于采样 Nyquist 频率',
+    'band contains fewer than two positive FFT bins': '窗口过短或频带过窄，请增加窗口帧数',
+    'nonuniform physical timestamps require resampling': '非均匀采样，当前不支持直接计算频谱',
+    'not every material site has valid vectors over the full window': '历史窗存在无效矢量，声音静音',
 }
 
 BG = "#101823"
@@ -75,6 +87,13 @@ class SonicApp:
         self._field_cache = None
         self._field_key = None
         self.max_dt_s = None
+        from ..observers.band import BandConfig
+        self.band_config = BandConfig()
+        self.band_reference = 0.005
+        self.band_low = tk.StringVar(value='8')
+        self.band_high = tk.StringVar(value='12')
+        self.band_window = tk.StringVar(value='256')
+        self.band_axis = tk.StringVar(value='0,0,1')
         self.activity_reference = 1e9  # fixed rad/s reference, not frame normalization
         self.replay_recipe = tk.StringVar(value='拓扑')
         self.speed = tk.StringVar(value='1')
@@ -140,7 +159,7 @@ class SonicApp:
         timeline = ttk.Frame(shell)
         timeline.pack(fill='x', pady=(0, 4))
         ttk.Label(timeline, text='回放配方').pack(side='left')
-        recipe_box = ttk.Combobox(timeline, textvariable=self.replay_recipe, values=['拓扑', '活动'], state='readonly', width=6)
+        recipe_box = ttk.Combobox(timeline, textvariable=self.replay_recipe, values=['拓扑', '活动', '频带'], state='readonly', width=6)
         recipe_box.pack(side='left', padx=5)
         recipe_box.bind('<<ComboboxSelected>>', lambda e: self.invalidate_field())
         ttk.Label(timeline, text='倍速').pack(side='left')
@@ -155,6 +174,12 @@ class SonicApp:
         ttk.Label(timeline, text='最大间隔/ns').pack(side='left', padx=(8, 3))
         ttk.Entry(timeline, textvariable=self.max_dt_ns, width=7).pack(side='left')
         ttk.Button(timeline, text='应用', command=self.apply_max_dt).pack(side='left', padx=4)
+        band_row = ttk.Frame(shell)
+        band_row.pack(fill='x', pady=(0, 4))
+        for label, variable, width in [('频带下限/GHz', self.band_low, 6), ('上限/GHz', self.band_high, 6), ('窗口/帧', self.band_window, 6), ('参考轴 XYZ', self.band_axis, 12)]:
+            ttk.Label(band_row, text=label).pack(side='left', padx=(0, 4))
+            ttk.Entry(band_row, textvariable=variable, width=width).pack(side='left', padx=(0, 8))
+        ttk.Button(band_row, text='应用频带', command=self.apply_band).pack(side='left')
         ttk.Label(shell, textvariable=self.data_note, style='Muted.TLabel', wraplength=1040).pack(anchor='w', pady=(0, 5))
         middle = ttk.Frame(shell)
         middle.pack(fill="both", expand=True)
@@ -284,8 +309,20 @@ class SonicApp:
             self.seek_to(self.replay.frames[index].sim_time_s)
         else:
             from ..sources.activity_demo import STEP_S
+            if scenario.startswith('field:band_'):
+                from ..sources.band_demo import STEP_S
             index = int(round(self.transport.sim_time_s/STEP_S))
             self.seek_to(max(0, index+delta)*STEP_S)
+
+    def apply_band(self):
+        from ..observers.band import BandConfig
+        try:
+            config = BandConfig(float(self.band_low.get())*1e9, float(self.band_high.get())*1e9,
+                                int(self.band_window.get()), tuple(float(v) for v in self.band_axis.get().split(',')))
+            self.band_config = config
+            self.invalidate_field()
+        except (ValueError, TypeError) as exc:
+            self.status.set(f'频带设置失败：{exc}')
 
     def apply_max_dt(self):
         try:
@@ -317,16 +354,28 @@ class SonicApp:
         from ..field_pipeline import observe_field
         from ..sources.analytic import make_field
         previous = None
+        history = None
         if scenario == 'replay':
             previous, frame = self.replay.pair_at(self.transport.sim_time_s)
-            recipe, axes = ('activity' if self.replay_recipe.get() == '活动' else 'topology'), {}
-            key = (scenario, self.replay.sha256, frame.sequence, recipe, self.max_dt_s)
+            recipe, axes = {'活动': 'activity', '频带': 'band'}.get(self.replay_recipe.get(), 'topology'), {}
+            key = (scenario, self.replay.sha256, frame.sequence, recipe, self.max_dt_s, self.band_config)
+            index = self.replay.index_at(self.transport.sim_time_s)
+            history = self.replay.frames[max(0, index-self.band_config.window_samples+1):index+1]
             if self.transport.sim_time_s >= self.replay.frames[-1].sim_time_s:
                 self.transport.sim_time_s = self.replay.frames[-1].sim_time_s
                 self.transport.playing = False
                 self.play_button.configure(text='播放')
         else:
             name = scenario.split(':', 1)[1]
+            if name.startswith('band_'):
+                from ..sources.band_demo import make_band_frame, STEP_S
+                tick = int(self.transport.sim_time_s/STEP_S + 1e-9)
+                key = (scenario, tick, self.band_config)
+                if key != self._field_key:
+                    history = tuple(make_band_frame(name, i) for i in range(max(0, tick-self.band_config.window_samples+1), tick+1))
+                    self._field_cache = observe_field(history[-1], 'band', history=history, band_config=self.band_config)
+                    self._field_key = key
+                return self._field_cache
             tick = int(self.transport.sim_time_s / 5e-11 + 1e-9) if name.startswith(('wall', 'activity_')) else 0
             key = (scenario, tick, self.max_dt_s)
             if key == self._field_key:
@@ -347,7 +396,7 @@ class SonicApp:
             recipe = 'direction' if name.startswith('wall') else 'topology'
             axes = dict(domain_axis=(0, 0, 1), reference_axis=(1, 0, 0)) if name == 'wall_pma' else {}
         if key != self._field_key:
-            self._field_cache = observe_field(frame, recipe, previous=previous, max_dt_s=self.max_dt_s, **axes)
+            self._field_cache = observe_field(frame, recipe, previous=previous, max_dt_s=self.max_dt_s, history=history, band_config=self.band_config, **axes)
             self._field_key = key
         return self._field_cache
 
@@ -396,10 +445,11 @@ class SonicApp:
         c.create_line(cx, cy-5, cx, cy+5, fill="#e7bd75")
         gains = {s.source_id: s.gain for s in self.scene.sources}
         activity = self.field_view is not None and self.field_view.diagnostic['recipe'] == 'activity'
+        band = self.field_view is not None and self.field_view.diagnostic['recipe'] == 'band'
         for i, o in enumerate(self.sample.observations):
             px, py = xy((o.position_m[0]-attention.origin_m[0])/attention.extent_m, (o.position_m[1]-attention.origin_m[1])/attention.extent_m)
             color = POS if o.sign > 0 else NEG
-            radius = 8 + 14*math.sqrt(min(o.strength/(self.activity_reference if activity else 1), 1))
+            radius = 8 + 14*math.sqrt(min(o.strength/(self.activity_reference if activity else (self.band_reference if band else 1)), 1))
             # Concentric sign outlines preserve true position for colocated sources.
             if o.sign < 0:
                 radius += 4
@@ -409,7 +459,7 @@ class SonicApp:
                 c.create_oval(px-3, py-3, px+3, py+3, fill=TEXT, outline='', tags=(f'selected:{o.source_id}',))
             if self.field_view is None or gains.get(o.source_id, 0) > 0:
                 c.create_text(px, py + (radius+13)*(1 if o.sign > 0 else -1),
-                              text=('a ' if activity else ('φ ' if o.orientation_enabled else ("+ " if o.sign > 0 else "− ")))+o.source_id, fill=color)
+                              text=('b ' if band else 'a ' if activity else ('φ ' if o.orientation_enabled else ("+ " if o.sign > 0 else "− ")))+o.source_id, fill=color)
             a = o.orientation_rad
             if o.orientation_enabled or self.field_view is None:
                 c.create_line(px, py, px+radius*math.cos(a), py-radius*math.sin(a), fill=color, arrow="last")
@@ -449,10 +499,12 @@ class SonicApp:
         attention = Attention(self.center, self.radius.get(), self.background.get(),
                               field.extent_m if field else 1e-6, field.center_m[:2] if field else (0, 0))
         is_activity = self.field_view is not None and self.field_view.diagnostic['recipe'] == 'activity'
+        is_band = self.field_view is not None and self.field_view.diagnostic['recipe'] == 'band'
+        unsigned = is_activity or is_band
         for button in self.sign_buttons:
-            button.state(['disabled'] if is_activity else ['!disabled'])
-        self.scene = map_sample(self.sample, attention, mode='both' if is_activity else self.mode.get(), master_gain=self.master.get(), audible=self.transport.audible,
-                                strength_reference=self.activity_reference if is_activity else 1.0)
+            button.state(['disabled'] if unsigned else ['!disabled'])
+        self.scene = map_sample(self.sample, attention, mode='both' if unsigned else self.mode.get(), master_gain=self.master.get(), audible=self.transport.audible,
+                                strength_reference=self.activity_reference if is_activity else (self.band_reference if is_band else 1.0))
         if self.audio_ready and not self.opening:
             try:
                 self.engine.update(self.scene)
@@ -481,6 +533,16 @@ class SonicApp:
                     note += ' · 旧文件未保存帧号，无法按序号检测缺帧'
                 self.data_note.set(note)
                 self.legend.set(f'活动强度：rad/s · 无正负号\n固定声音参考 {self.activity_reference:.3g} rad/s\n暂停时探听保留测量值')
+            elif is_band:
+                self.subtitle.set(f'频带观察 · {self.sample.source_kind} · 归一化方向的横向均方强度 · 箭头 XY / 蓝橙为 ±z')
+                d = self.field_view.diagnostic
+                df = d['frequency_resolution_hz']
+                resolution = f'{df/1e9:.3g} GHz' if df is not None else '待定'
+                span = d['window_span_s']
+                span_text = f'{span*1e9:.3g} ns' if span is not None else '待定'
+                reason = BAND_REASONS.get(d['reason'], d['reason'])
+                self.data_note.set(f"历史 {d['samples_available']}/{d['samples_required']} 帧 · 窗宽 {span_text} · 分辨率 {resolution} · {reason}")
+                self.legend.set(f'横向频带均方强度 · 无正负号\n固定声音参考 {self.band_reference:g}\n逐点求功率后汇总 · 非物理能量')
             elif self.field_view.diagnostic['recipe'] == 'direction':
                 self.legend.set('φ：音高 + 起伏速率编码\n强度为横向投影面积权重\n非拓扑符号 · 使用正声部输出')
             else:
@@ -490,10 +552,10 @@ class SonicApp:
             self.legend.set('绿色 + / 紫色 −\n位置表示方位，音色表示符号\n主声场最多 4 路 · 虚拟距离固定')
         self._draw(attention)
         self.table.delete(*self.table.get_children())
-        self.table.heading('strength', text='贡献 / rad/s' if is_activity else '原始强度')
+        self.table.heading('strength', text='贡献 / rad/s' if is_activity else ('均方贡献' if is_band else '原始强度'))
         gains = {s.source_id: s.gain for s in self.scene.sources}
         for o in self.sample.observations:
-            self.table.insert("", "end", values=(o.source_id, '—' if is_activity else ("+" if o.sign > 0 else "−"),
+            self.table.insert("", "end", values=(o.source_id, '—' if unsigned else ("+" if o.sign > 0 else "−"),
                 f"{o.position_m[0]*1e6:.2f}, {o.position_m[1]*1e6:.2f}", f"{o.strength:.3g}",
                 f"{gains.get(o.source_id, 0):.4f}", f"{math.degrees(o.orientation_rad):.1f}",
                 ('圈内' if attention.contains(o) else '圈外') + (' / 已选入' if gains.get(o.source_id, 0) > 0 else ' / 未选入')))
@@ -511,7 +573,7 @@ class SonicApp:
                                physical_topology_computed=self.field_view.diagnostic['recipe'] == 'topology',
                                field=self.field_view.diagnostic)
             payload.update(playback_rate=self.transport.playback_rate, activity_reference_rad_s=self.activity_reference,
-                           activity_max_dt_s=self.max_dt_s)
+                           activity_max_dt_s=self.max_dt_s, band_reference=self.band_reference)
             Path(filename).write_text(report_json(payload), encoding="utf-8")
 
     def close(self):
@@ -523,11 +585,18 @@ class SonicApp:
         self.window.destroy()
 
 
-def run(no_audio=False, dll_path=None, field_demo=None, replay_path=None, recipe='topology', max_dt_s=None, activity_reference=1e9):
+def run(no_audio=False, dll_path=None, field_demo=None, replay_path=None, recipe='topology', max_dt_s=None, activity_reference=1e9, band_config=None, band_reference=0.005):
     configure_dpi()
     root = tk.Tk()
     app = SonicApp(root, no_audio=no_audio, dll_path=dll_path)
-    app.replay_recipe.set('活动' if recipe == 'activity' else '拓扑')
+    app.replay_recipe.set({'activity': '活动', 'band': '频带'}.get(recipe, '拓扑'))
+    if band_config is not None:
+        app.band_config = band_config
+        app.band_low.set(f'{band_config.low_hz/1e9:g}')
+        app.band_high.set(f'{band_config.high_hz/1e9:g}')
+        app.band_window.set(str(band_config.window_samples))
+        app.band_axis.set(','.join(str(v) for v in band_config.reference_axis))
+    app.band_reference = band_reference
     app.max_dt_s = max_dt_s
     app.max_dt_ns.set('' if max_dt_s is None else f'{max_dt_s*1e9:g}')
     app.activity_reference = activity_reference

@@ -22,7 +22,8 @@ def _tiles(shape, divisions=4):
 
 
 def observe_field(frame, recipe='topology', *, method='solid_angle', boundary='open',
-                  domain_axis=(1, 0, 0), reference_axis=(0, 1, 0), previous=None, max_dt_s=None):
+                  domain_axis=(1, 0, 0), reference_axis=(0, 1, 0), previous=None, max_dt_s=None,
+                  history=None, band_config=None):
     observations = []
     validity_override = None
     if recipe == 'topology':
@@ -94,6 +95,38 @@ def observe_field(frame, recipe='topology', *, method='solid_angle', boundary='o
             aggregation='sum of tile rates / current material site count; equals material mean on full coverage')
         if 'sequence_inferred:v1' in frame.provenance:
             diagnostic['warnings'].append('source sequences inferred from v1 records; sequence gaps cannot be detected')
+    elif recipe == 'band':
+        from .observers.band import BandConfig, band_power
+        config = band_config or BandConfig()
+        history = tuple(history) if history is not None else (frame,)
+        if not history or history[-1] is not frame:
+            raise ValueError('band history must end at the observed frame')
+        result = band_power(history, config)
+        coverage, validity_override = result.coverage, result.validity
+        ny, nx = frame.vectors.shape[:2]
+        x, y = np.meshgrid(np.arange(nx)*frame.dx_m+frame.origin_m[0],
+                           np.arange(ny)*frame.dy_m+frame.origin_m[1])
+        count = int(np.count_nonzero(frame.mask))
+        for tile, index in _tiles(result.valid.shape):
+            weights = np.where(result.valid[index], result.power[index], 0.0)
+            total = float(np.sum(weights))
+            if total <= 0 or not np.isfinite(total):
+                continue
+            position = (float(np.sum(x[index]*weights)/total), float(np.sum(y[index]*weights)/total), frame.origin_m[2])
+            observations.append(Observation(f'band:{tile}', position, total/count,
+                entity_id=frame.entity_id, quantity='transverse_band_mean_square_contribution', unit='1'))
+        summary = f'频带 {config.low_hz/1e9:g}–{config.high_hz/1e9:g} GHz · 均方强度 {result.mean_power:.3g}'
+        diagnostic = dict(recipe=recipe, method='trailing periodic-Hann periodogram; temporal mean removed',
+            low_hz=config.low_hz, high_hz=config.high_hz, reference_axis=list(config.reference_axis),
+            mean_power=result.mean_power, max_power=result.max_power, unit='1',
+            samples_available=result.samples_available, samples_required=result.samples_required,
+            dt_s=result.dt_s, frequency_resolution_hz=result.frequency_resolution_hz,
+            window_span_s=result.window_span_s, bin_frequencies_hz=list(result.bin_frequencies_hz),
+            coverage=coverage, validity=result.validity, reason=result.reason, warnings=list(result.warnings),
+            aggregation='per-site spectral power before tile sum / material site count',
+            physical_energy_computed=False)
+        if 'sequence_inferred:v1' in frame.provenance:
+            diagnostic['warnings'].append('v1 inferred sequences cannot detect missing source frames')
     else:
         raise ValueError('unknown field recipe')
     validity = validity_override or ('valid' if coverage == 1 else 'invalid')

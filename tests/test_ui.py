@@ -152,3 +152,36 @@ def test_replay_activity_gap_and_recovery_in_window(app):
     assert app.field_view.diagnostic['mean_rad_s'] == pytest.approx(OMEGA_RAD_S)
     assert app.sample.validity == 'valid' and app.scene.sources
     assert not app.transport.playing  # end of replay holds measured result
+
+
+def test_band_navigation_switch_and_unsigned_controls(app):
+    from mumax_sonic.ui.app import FIELD_SCENARIOS
+    from mumax_sonic.sources.band_demo import STEP_S
+    app.scenario.set(FIELD_SCENARIOS['field:band_in'])
+    app.reset()
+    app._tick()
+    assert app.sample.validity == 'warming_up' and not app.scene.sources
+    app.step_frame(1)
+    assert app.transport.sim_time_s == STEP_S
+    app.seek_to(300*STEP_S)
+    app.mode.set('negative')
+    app._tick()
+    assert app.sample.validity == 'valid' and app.scene.sources
+    assert all('disabled' in button.state() for button in app.sign_buttons)
+    power = app.field_view.diagnostic['mean_power']
+    app.speed.set('4')
+    app.change_speed()
+    app._tick()
+    assert app.field_view.diagnostic['mean_power'] == power
+    app.band_low.set('28')
+    app.band_high.set('32')
+    app.apply_band()
+    app._tick()
+    assert app.field_view.diagnostic['mean_power'] < power*1e-6
+    app.seek_to(0)
+    app._tick()
+    assert app.sample.validity == 'warming_up' and not app.scene.sources
+    previous = app.band_config
+    app.band_axis.set('0,0,0')
+    app.apply_band()
+    assert app.band_config == previous

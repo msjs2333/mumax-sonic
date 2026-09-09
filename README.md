@@ -2,7 +2,18 @@
 
 面向微磁与相关磁性连续场仿真的空间可听化工具：用可解释的声音辅助感知状态、运动、频带活动与拓扑结构，并通过可调关注区域分配听觉注意力。
 
-**状态：P2b 活动观察与回放时间处理已实现。** 在拓扑、连续取向与 NPZ 回放基础上，新增局部角变化率、倍速、逐帧/跳转与缺帧检查。已用解析场验证，尚未验证真实 MuMax 输出；频带、自动壁追踪和头追仍待实现。见 [P2b 实现与验证](docs/p2b-validation.md)。
+**状态：P2c 频带最小配方已实现。** 支持拓扑、连续取向、活动与横向频带均方强度，含 NPZ 回放、窗口预热和缺帧检查。已用解析场验证；真实 MuMax/OVF、自动壁追踪和头追仍待实现。见 [P2c 实现与验证](docs/p2c-validation.md)。
+
+## 运行频带观察
+
+```powershell
+python launch.py --field-demo band_mixed
+python launch.py --field-demo band_opposite
+python scripts/make_field_demo.py local/band.npz --scenario band_mixed --frames 320
+python launch.py --replay local/band.npz --recipe band
+```
+
+默认 8–12 GHz、256 帧、参考轴 +z，解析数据每 5 ps 采样。点击播放，或跳转到 1.5 ns 查看已有历史；窗口显示预热、物理窗宽和分辨率。逐体元求频带功率后再空间汇总，空间反相不会被平均抵消。该量是归一化方向的横向均方强度，不是能量，也不自动识别自旋波。设置与限制见 [P2c 文档](docs/p2c-validation.md)。
 
 ## 运行活动观察
 
@@ -19,7 +30,7 @@ python launch.py --replay local/activity.npz --recipe activity
 python launch.py --inspect-field local/activity.npz --recipe activity --report local/activity.json
 ```
 
-窗口的“回放配方”切换拓扑/活动；“最大间隔/ns”可限制允许计算的物理间隔，留空不推断采样周期，命令行对应 `--max-dt-ps`。真实序号缺口始终使该帧活动未就绪。默认听觉参考为 `1e9 rad/s`，可用 `--activity-reference-rad-s` 调整，不改物理值。活动没有正负符号，窗口停用正负 solo；圈大小使用同一听觉参考。
+窗口的“回放配方”切换拓扑/活动/频带；“最大间隔/ns”可限制允许计算的物理间隔，留空不推断采样周期，命令行对应 `--max-dt-ps`。真实序号缺口始终使该帧活动未就绪。默认听觉参考为 `1e9 rad/s`，可用 `--activity-reference-rad-s` 调整，不改物理值。活动没有正负符号，窗口停用正负 solo；圈大小使用同一听觉参考。
 
 ## 运行场观察
 
@@ -39,18 +50,19 @@ python launch.py --replay local/pair.npz
 python launch.py --inspect-field local/pair.npz --method finite_difference --report local/pair.json
 ```
 
-“加载场”打开 NPZ，当前 GUI 回放支持拓扑或活动。保存格式已升级到 v2，保留原始帧序号和逐帧来源；仍可读 v1，但 v1 没有帧序号，无法据此检测缺帧，界面会提示。文件生成不覆盖已有文件。格式见 [P2b 文档](docs/p2b-validation.md)，拓扑边界见 [P2a 文档](docs/p2a-validation.md)；NPZ 尚不直接读取 OVF。
+“加载场”打开 NPZ，当前 GUI 回放支持拓扑、活动或频带。保存格式已升级到 v2，保留原始帧序号和逐帧来源；仍可读 v1，但 v1 没有帧序号，无法据此检测缺帧，界面会提示。文件生成不覆盖已有文件。格式见 [P2b 文档](docs/p2b-validation.md)，拓扑边界见 [P2a 文档](docs/p2a-validation.md)；NPZ 尚不直接读取 OVF。
 
 ## 运行 P1
 
 在仓库根目录，使用带 Tk 的 64 位 Python 3.11+：
 
 ```powershell
+python -m pip install "numpy>=1.26,<3"
 python scripts/install_audio.py
 python launch.py
 ```
 
-安装脚本从官方获取固定版本 OpenAL Soft 1.25.2，校验 SHA256，仅放入 `local/`。不需要 GPU；P1 音频使用标准库，P2a 场计算需要 NumPy。已有 DLL 可用 `--dll` 指定完整路径。只预览界面用 `python launch.py --no-audio`。
+安装脚本从官方获取固定版本 OpenAL Soft 1.25.2，校验 SHA256，仅放入 `local/`。不需要 GPU；音频模块使用标准库，当前场观察窗口需要 NumPy。已有 DLL 可用 `--dll` 指定完整路径。只预览界面用 `python launch.py --no-audio`。
 
 窗口默认不发声。选择耳机输出设备，点击“开始试听 / 重连”，从较低音量开始；“播放”推进合成时间，“暂停时探听静态”决定暂停后是否仍能听当前状态。拖动画面移动关注区域，调节半径与背景比例，再比较正负 solo。切换设备或 HRTF 请求后点击重连，底部显示实际 HRTF 状态。HRTF 对照时应避免叠加其他空间音效。
 
