@@ -4,6 +4,8 @@
 
 **状态：P3b/P3c 已实现。** 支持 MuMax3 完整 OVF 输出桥接、增量读取和 MuMax+ 直接采样；已验证两个真实小网格后端。运行限制与证据见 [P3b/P3c 验证记录](docs/p3bc-validation.md)。
 
+P3d 已加入持续运行、真实成对开销基准与故障恢复测试。首批测量发现竞争负载和批量追赶可能超过延迟预算，性能目标尚未全部通过，见 [P3d 验证记录](docs/p3d-validation.md)。
+
 ```powershell
 python launch.py --backend-info
 python scripts/run_mumaxplus_live.py --frames 60
