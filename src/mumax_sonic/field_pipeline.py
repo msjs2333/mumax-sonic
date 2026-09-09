@@ -193,7 +193,8 @@ def apply_aggregation(view, attention, budget=4, mode='fixed'):
                 represented = sum(o.strength for o in result.observations if o.sign in signs)
                 channels[label] = dict(input=before, represented=represented, omitted=max(0.0, before-represented))
             diagnostic['spatial_aggregation'] = dict(method='adaptive',
-                basis='per-site observer contributions; signs conserved separately; soft focus and background', channels=channels)
+                basis=(view.diagnostic['spatial_aggregation']['basis'] if 'focus_compute' in view.diagnostic
+                       else 'per-site observer contributions; signs conserved separately; soft focus and background'), channels=channels)
             diagnostic['adaptive_aggregation'] = info
             return replace(view, sample=replace(view.sample, observations=result.observations), diagnostic=diagnostic)
     diagnostic['adaptive_aggregation'] = dict(info, fallback='fixed_4x4')

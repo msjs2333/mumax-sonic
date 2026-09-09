@@ -1,6 +1,5 @@
 """Bounded host-frame ingestion; solver calls stay on the producer's thread."""
 from collections import deque
-from dataclasses import replace
 from threading import Condition, Thread
 import time
 
@@ -10,7 +9,7 @@ from .live import LiveConfig
 
 
 class FrameStream:
-    def __init__(self, config=LiveConfig(), *, max_pending=8, max_bytes=256*1024*1024):
+    def __init__(self, config=LiveConfig(), *, max_pending=2, max_bytes=256*1024*1024):
         if type(max_pending) is not int or max_pending < 1 or type(max_bytes) is not int or max_bytes < 1:
             raise ValueError('positive queue and memory limits required')
         self.config = config
@@ -21,6 +20,10 @@ class FrameStream:
         self._closed = False
         self._finished = False
         self._processing = False
+        self._attention = None
+        self._focus_enabled = False
+        self._roi_dirty = False
+        self._focus = None
         self._generation = 0
         self._identity = None
         self._last_sequence = self._last_time = None
@@ -76,6 +79,17 @@ class FrameStream:
         with self._condition:
             self._finished = True
 
+    def set_attention(self, attention, enabled=False):
+        """Latest UI request; worker owns all physical computation."""
+        enabled = bool(enabled) and self.config.recipe == 'activity'
+        with self._condition:
+            if self._closed:
+                return
+            if (enabled and attention != self._attention) or enabled != self._focus_enabled:
+                self._attention, self._focus_enabled = attention, enabled
+                self._roi_dirty = True
+                self._condition.notify()
+
     def fail(self, error):
         """Expose a producer/solver failure and invalidate queued output."""
         with self._condition:
@@ -103,30 +117,47 @@ class FrameStream:
             self._pending.clear()
             self._state, self._reason = 'closed', 'closed'
             self._condition.notify_all()
+        if self._focus is not None:
+            self._focus.close()
 
     def _run(self):
         history = deque(maxlen=self._history_limit)
         generation = None
         while True:
             with self._condition:
-                while not self._closed and not self._pending:
+                while not self._closed and not self._pending and not self._roi_dirty:
                     self._condition.wait()
                 if self._closed:
                     return
                 batch = tuple(self._pending)
                 self._pending.clear()
+                self._roi_dirty = False
+                attention, focused = self._attention, self._focus_enabled
+                if not batch and not history:
+                    continue
                 self._processing = True
             started = time.monotonic()
-            frame, received, job_generation = batch[-1]
+            if batch:
+                frame, received, job_generation = batch[-1]
             if job_generation != generation:
                 history.clear()
                 generation = job_generation
-            history.extend(item if item.source_kind == 'live' else replace(item, source_kind='live') for item, _, _ in batch)
+            history.extend(item.with_source_kind('live') for item, _, _ in batch)
             try:
                 frames = tuple(history)
-                view = observe_field(frames[-1], self.config.recipe, method=self.config.method,
-                    previous=frames[-2] if len(frames)>1 else None, max_dt_s=self.config.max_dt_s,
-                    history=frames, band_config=self.config.band_config)
+                if focused:
+                    if self._focus is None:
+                        from ..observers.focused_activity import FocusedActivity
+                        with self._condition:
+                            if self._closed:
+                                return
+                            self._focus = FocusedActivity()
+                    view = self._focus.observe(frames[-2] if len(frames)>1 else None,
+                        frames[-1], attention, max_dt_s=self.config.max_dt_s)
+                else:
+                    view = observe_field(frames[-1], self.config.recipe, method=self.config.method,
+                        previous=frames[-2] if len(frames)>1 else None, max_dt_s=self.config.max_dt_s,
+                        history=frames, band_config=self.config.band_config)
                 error = None
             except Exception as exc:
                 view, error = None, str(exc)
@@ -137,11 +168,11 @@ class FrameStream:
                 if job_generation != self._generation:
                     continue
                 self._processing_ms = (time.monotonic()-started)*1000
-                self._skipped += len(batch)-1
+                self._skipped += max(0, len(batch)-1)
                 self._last_error = error
                 if error:
                     self._state, self._reason = 'invalid', 'observer failed'
                 else:
                     self._view, self._received_at = view, received
-                    self._updates += 1
+                    self._updates += bool(batch)
                     self._state, self._reason = 'current', 'direct host frame observed'

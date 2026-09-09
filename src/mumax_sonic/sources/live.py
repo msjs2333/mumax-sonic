@@ -56,6 +56,11 @@ class LiveFollower:
         self._last_error: str | None = None
         self._processing_ms: float | None = None
         self._processing_breakdown_ms = {}
+        self._attention = None
+        self._focus_enabled = False
+        self._attention_revision = 0
+        self._applied_attention_revision = 0
+        self._focus = None
         self._updates = 0
         self._skipped_observation_frames = 0
         self._last_new_at: float | None = None
@@ -76,6 +81,17 @@ class LiveFollower:
         with self._lock:
             self._state = 'closed'
             self._reason = 'closed'
+        if self._focus is not None:
+            self._focus.close()
+
+    def set_attention(self, attention, enabled=False):
+        enabled = bool(enabled) and self.config.recipe == 'activity'
+        with self._lock:
+            if self._state == 'closed':
+                return
+            if (enabled and attention != self._attention) or enabled != self._focus_enabled:
+                self._attention, self._focus_enabled = attention, enabled
+                self._attention_revision += 1
 
     def snapshot(self) -> dict:
         """Return the current worker result; this does no I/O or array copies."""
@@ -97,7 +113,7 @@ class LiveFollower:
                 stamp = self._stamp()
                 if stamp is None:
                     self._publish_waiting(started, 'manifest is missing')
-                elif stamp != self._last_stamp or self._state == 'invalid':
+                elif stamp != self._last_stamp or self._state == 'invalid' or self._attention_revision != self._applied_attention_revision:
                     self._last_stamp = stamp
                     self._reload(started)
                 else:
@@ -116,6 +132,8 @@ class LiveFollower:
     def _reload(self, started):
         timings = {}
         stage_started = time.monotonic()
+        with self._lock:
+            attention, focused, revision = self._attention, self._focus_enabled, self._attention_revision
         try:
             replay = self._reader.load(self.path)
             timings['read_validate'] = (time.monotonic()-stage_started)*1000
@@ -129,12 +147,21 @@ class LiveFollower:
             is_new = self._view is None or key != self._key(self._view.field)
             timings['frame_identity'] = (time.monotonic()-stage_started)*1000
             stage_started = time.monotonic()
-            if is_new:
+            if is_new or revision != self._applied_attention_revision:
                 previous = frames[-2] if len(frames) > 1 else None
-                view = observe_field(latest, self.config.recipe, method=self.config.method,
-                    previous=previous, max_dt_s=self.config.max_dt_s, history=frames,
-                    band_config=self.config.band_config)
-                view = replace(view, field=replace(latest, source_kind='live'),
+                if focused:
+                    if self._focus is None:
+                        from ..observers.focused_activity import FocusedActivity
+                        with self._lock:
+                            if self._state == 'closed':
+                                return
+                            self._focus = FocusedActivity()
+                    view = self._focus.observe(previous, latest, attention, max_dt_s=self.config.max_dt_s)
+                else:
+                    view = observe_field(latest, self.config.recipe, method=self.config.method,
+                        previous=previous, max_dt_s=self.config.max_dt_s, history=frames,
+                        band_config=self.config.band_config)
+                view = replace(view, field=latest.with_source_kind('live'),
                     sample=replace(view.sample, source_kind='live'), diagnostic=dict(view.diagnostic, source_kind='live'))
             else:
                 view = self._view
@@ -144,6 +171,7 @@ class LiveFollower:
             timings['commit'] = (time.monotonic()-stage_started)*1000
             with self._lock:
                 self._reader_diagnostics = self._reader.diagnostics
+                self._applied_attention_revision = revision
         except Exception as exc:
             self._publish_invalid(started, str(exc))
         finally:
@@ -167,6 +195,7 @@ class LiveFollower:
                 self._view = view
                 self._updates += 1
                 self._last_new_at = started  # include read/observer latency in freshness
+            self._view = view
             self._state = 'current' if self._last_new_at is not None else 'waiting'
             self._reason = 'new physical frame observed' if is_new else 'published manifest has no new physical frame'
             self._last_error = None

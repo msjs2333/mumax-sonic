@@ -198,7 +198,7 @@ def _iter_ovf_manifest(path, meta, raw, *, cumulative_limit=True, verify_hashes=
             geometry = current_geometry
         elif current_geometry != geometry:
             raise ValueError('OVF mesh or component labels change within one declared segment')
-        vectors = field.vectors[layer][..., order]
+        vectors = field.vectors[layer] if order == [0, 1, 2] else field.vectors[layer][..., order]
         decoded_bytes += vectors.size*8 + vectors.shape[0]*vectors.shape[1]
         if decoded_bytes > MAX_BYTES:
             raise ValueError('decoded OVF sequence exceeds 256 MiB limit')

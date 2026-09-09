@@ -31,6 +31,7 @@ def main():
     parser.add_argument('--source-budget', type=int, default=4, choices=range(1, MAX_SOURCE_BUDGET+1), help='Maximum spatial voices; default 4, gain headroom uses 1/budget')
     parser.add_argument('--aggregation', choices=['fixed', 'adaptive'], default='fixed', help='Spatial contribution grouping')
     parser.add_argument('--follow', type=Path, help='Follow atomically published OVF JSON snapshots in the GUI')
+    parser.add_argument('--focus-compute', action='store_true', help='Prioritize attention-region activity; refresh background separately')
     parser.add_argument('--live-stale-s', type=float, default=2.0, help='Mute live data after this wall-clock age without a new physical frame')
     parser.add_argument('--backend-info', action='store_true', help='Probe MuMax3 executable and MuMax+ import capabilities without running a solver')
     args = parser.parse_args()
@@ -161,7 +162,7 @@ def main():
     else:
         from .ui.app import run
         run(no_audio=args.no_audio, dll_path=args.dll, field_demo=args.field_demo, replay_path=args.replay,
-            recipe=args.recipe, max_dt_s=max_dt_s, activity_reference=args.activity_reference_rad_s, band_config=band_config, band_reference=args.band_reference, source_budget=args.source_budget, aggregation=args.aggregation, follow_path=args.follow, live_stale_s=args.live_stale_s)
+            recipe=args.recipe, max_dt_s=max_dt_s, activity_reference=args.activity_reference_rad_s, band_config=band_config, band_reference=args.band_reference, source_budget=args.source_budget, aggregation=args.aggregation, follow_path=args.follow, live_stale_s=args.live_stale_s, focus_compute=args.focus_compute)
 
 
 if __name__ == "__main__":

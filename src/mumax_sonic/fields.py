@@ -51,6 +51,17 @@ class FieldFrame:
         ny, nx = self.vectors.shape[:2]
         return max((nx-1)*self.dx_m, (ny-1)*self.dy_m)/2
 
+    def with_source_kind(self, source_kind):
+        """Change a label while sharing this frame's read-only array payload."""
+        if source_kind not in {'synthetic', 'replay', 'live'}:
+            raise ValueError('unknown field source kind')
+        if source_kind == self.source_kind:
+            return self
+        from copy import copy
+        result = copy(self)
+        object.__setattr__(result, 'source_kind', source_kind)
+        return result
+
     @property
     def center_m(self):
         ny, nx = self.vectors.shape[:2]

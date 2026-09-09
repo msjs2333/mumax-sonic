@@ -38,6 +38,17 @@ def test_replay_roundtrip_has_identity_and_holds_physical_frames(tmp_path):
     with pytest.raises(ValueError): save_replay(tmp_path/'bad.npz', frames[::-1])
 
 
+def test_source_label_shares_readonly_payload_without_mutating_original():
+    original = frame()
+    relabeled = original.with_source_kind('live')
+    assert relabeled.source_kind == 'live'
+    assert original.source_kind == 'synthetic'
+    assert relabeled.vectors is original.vectors
+    assert relabeled.mask is original.mask
+    with pytest.raises(ValueError):
+        relabeled.vectors[0, 0, 0] = 0
+
+
 def test_positive_negative_aggregation_conserves_charge_before_attention():
     view = observe_field(frame())
     assert view.sample.validity == 'valid'

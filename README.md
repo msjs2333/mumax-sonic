@@ -8,6 +8,8 @@ P3d 已加入持续运行、真实成对开销基准与故障恢复测试。首�
 
 实时只读路径默认信任生产端：不计算逐帧内容哈希、不审计历史文件，仅增量处理新帧；保留时间、单位、网格与半写文件检查。见 [读取简化与复测](docs/p3d-reader-validation.md)。
 
+实时活动可勾选“关注区优先计算”，或增加 `--focus-compute`：前景即时分析、背景低频刷新。1500×500 CDW 存档帧上，约 4.7% 计算区域的前景中位约 31 ms；全帧读取、大圈计算和频带内存仍有限制。完整分项、采样优化与实际窗口/音频短测见 [关注区与全链路成本](docs/p3d-attention-validation.md)。
+
 ```powershell
 python launch.py --backend-info
 python scripts/run_mumaxplus_live.py --frames 60

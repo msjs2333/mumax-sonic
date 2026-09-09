@@ -85,6 +85,7 @@ class SonicApp:
         self.selection_report = None
         self.source_budget = tk.IntVar(value=4)
         self.aggregation_mode = tk.StringVar(value='fixed')
+        self.focus_compute = tk.BooleanVar(value=False)
         self._aggregation_key = None
         self._aggregation_view = None
         from .aggregation_worker import LatestAggregation
@@ -212,6 +213,7 @@ class SonicApp:
         controls = ttk.Frame(middle, padding=(20, 4, 0, 0), width=280)
         controls.pack(side="right", fill="y")
         ttk.Label(controls, text="关注区域 · 拖动画面移动").pack(anchor="w", pady=(0, 7))
+        ttk.Checkbutton(controls, text="关注区优先计算（实时活动）", variable=self.focus_compute).pack(anchor='w', pady=(0, 5))
         for label, var, lo, hi in (("半径", self.radius, 0.1, 1.5), ("背景比例", self.background, 0, 1), ("总音量", self.master, 0, 0.6)):
             ttk.Label(controls, text=label, style="Muted.TLabel").pack(anchor="w")
             ttk.Scale(controls, from_=lo, to=hi, variable=var, length=245).pack(fill="x", pady=(0, 9))
@@ -469,6 +471,7 @@ class SonicApp:
     def _poll_live(self):
         if self._external_live_source is not None:
             source = self._external_live_source
+            self._push_live_attention(source)
             self.replay_recipe.set({'activity': '活动', 'band': '频带'}.get(source.config.recipe, '拓扑'))
             self.live_snapshot = source.snapshot()
             return self.live_snapshot
@@ -483,8 +486,17 @@ class SonicApp:
             self.live_follower.start()
             self._live_settings = settings
             self._aggregation_base = None
+        self._push_live_attention(self.live_follower)
         self.live_snapshot = self.live_follower.snapshot()
         return self.live_snapshot
+
+    def _push_live_attention(self, source):
+        if not hasattr(source, 'set_attention'):
+            return
+        field = self.field_view.field if self.field_view is not None else None
+        attention = Attention(self.center, self.radius.get(), self.background.get(),
+            field.extent_m if field else 1e-6, field.center_m[:2] if field else (0, 0))
+        source.set_attention(attention, enabled=self.focus_compute.get())
 
     def bounds(self):
         return (35, 28, max(100, self.canvas.winfo_width()-35), max(100, self.canvas.winfo_height()-34))
@@ -718,6 +730,9 @@ class SonicApp:
             age = '—' if snapshot['age_s'] is None else f"{snapshot['age_s']:.2f}s"
             self.data_note.set(f"实时 {snapshot['state']} · 最新帧年龄 {age} · 已更新 {snapshot['updates']} 次 · {snapshot['reason']}"
                 + (' · 聚合追赶中' if aggregation_pending else ''))
+            if self.field_view is not None and 'focus_compute' in self.field_view.diagnostic:
+                self.data_note.set(self.data_note.get() + ' · ' + self.field_view.summary
+                                  + ' · 覆盖基于已计算描述，不代表全场即时测量')
             self.play_button.configure(text='实时跟随')
         self._draw(draw_attention)
         self.table.delete(*self.table.get_children())
@@ -759,7 +774,7 @@ class SonicApp:
         self.window.destroy()
 
 
-def run(no_audio=False, dll_path=None, field_demo=None, replay_path=None, recipe='topology', max_dt_s=None, activity_reference=1e9, band_config=None, band_reference=0.005, source_budget=4, aggregation='fixed', follow_path=None, live_stale_s=2.0, live_source=None):
+def run(no_audio=False, dll_path=None, field_demo=None, replay_path=None, recipe='topology', max_dt_s=None, activity_reference=1e9, band_config=None, band_reference=0.005, source_budget=4, aggregation='fixed', follow_path=None, live_stale_s=2.0, live_source=None, focus_compute=False):
     configure_dpi()
     root = tk.Tk()
     app = SonicApp(root, no_audio=no_audio, dll_path=dll_path)
@@ -773,6 +788,7 @@ def run(no_audio=False, dll_path=None, field_demo=None, replay_path=None, recipe
     app.band_reference = band_reference
     app.source_budget.set(source_budget)
     app.aggregation_mode.set(aggregation)
+    app.focus_compute.set(focus_compute)
     app.max_dt_s = max_dt_s
     app.max_dt_ns.set('' if max_dt_s is None else f'{max_dt_s*1e9:g}')
     app.activity_reference = activity_reference

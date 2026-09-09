@@ -79,11 +79,14 @@ def test_blocked_observer_becomes_stale_and_a_later_frame_recovers(monkeypatch):
     try:
         stream.submit(make_activity_frame("activity_rotation", 0))
         _wait(stream, lambda state: state["updates"] == 1)
+        second_submitted = time.monotonic()
         stream.submit(make_activity_frame("activity_rotation", 1))
         assert entered.wait(1)
         stale = _wait(stream, lambda state: state["state"] == "stale")
         assert stale["view"].sample.sequence == 0
         assert stale["age_s"] >= config.stale_after_s
+        # The first result can expire slightly before the blocked second frame.
+        time.sleep(max(0, second_submitted + config.stale_after_s + .02 - time.monotonic()))
         release.set()
         delayed = _wait(stream, lambda state: state["updates"] == 2)
         assert delayed["state"] == "stale"

@@ -91,6 +91,10 @@ class MuMaxPlusSampler:
         self._last_sequence: int | None = None
         self._last_time_s: float | None = None
         self.last_capture_ms: float | None = None
+        # Geometry is a sampler/segment contract.  It is intentionally read
+        # and checked once: live capture must not rebuild coordinate planes or
+        # copy a material mask every physical frame.
+        self._static: dict[str, Any] | None = None
 
     def _geometry_mask(self, shape: tuple[int, int, int], z_index: int) -> np.ndarray:
         if self._explicit_mask is not None:
@@ -113,12 +117,45 @@ class MuMaxPlusSampler:
             raise ValueError("sequence must increase within a segment")
         started = time.perf_counter()
         before_time = float(self.world.timesolver.time)
-        raw = np.array(self.quantity.eval(), copy=True)
+        # eval() owns the transfer.  ``moveaxis`` below is a view and
+        # FieldFrame performs the one required immutable host copy.
+        raw = np.asarray(self.quantity.eval())
         after_time = float(self.world.timesolver.time)
         if before_time != after_time:
             raise RuntimeError("MuMax+ solver advanced during capture")
         if raw.ndim != 4 or raw.shape[0] != 3:
             raise ValueError("quantity eval() must return shape (3, nz, ny, nx)")
+        _, nz, ny, nx = raw.shape
+        if self._static is None:
+            self._static = self._capture_static(raw)
+        elif raw.shape != self._static["raw_shape"]:
+            raise ValueError("MuMax+ field shape changed; create a new sampler and segment")
+        z_index = self._static["z_index"]
+        if self.z_index != z_index and not (self.z_index is None and z_index == 0):
+            raise ValueError("MuMax+ z_index changed; create a new sampler and segment")
+        if self._last_time_s is not None and before_time < self._last_time_s:
+            raise ValueError("physical time must not decrease within a segment")
+        static = self._static
+        assert static is not None
+        vectors = np.moveaxis(raw[:, z_index, :, :], 0, -1)
+        provenance = json.dumps({
+            "backend": "mumaxplus", "version": static["version"],
+            "entity_id": self.entity_id, "segment_id": self.segment_id,
+            "quantity": static["quantity_name"], "quantity_semantics": self.quantity_semantics,
+            "raw_shape": list(raw.shape), "z_index": z_index,
+            "sim_time_s": before_time,
+            "transfer_and_geometry_ms": (time.perf_counter() - started) * 1000.0,
+        }, sort_keys=True)
+        frame = FieldFrame(vectors, static["cellsize"][0], static["cellsize"][1], before_time,
+                           static["origin"], static["mask"], self.entity_id, "live",
+                           self.segment_id, sequence, self.time_kind, provenance)
+        self._last_sequence = sequence
+        self._last_time_s = before_time
+        self.last_capture_ms = (time.perf_counter() - started) * 1000.0
+        return frame
+
+    def _capture_static(self, raw: np.ndarray) -> dict[str, Any]:
+        """Validate and retain immutable geometry from this sampler's first frame."""
         _, nz, ny, nx = raw.shape
         if ny < 3 or nx < 3:
             raise ValueError("MuMax+ XY layer must be at least 3 by 3")
@@ -127,8 +164,6 @@ class MuMaxPlusSampler:
         z_index = 0 if self.z_index is None else self.z_index
         if type(z_index) is not int or not 0 <= z_index < nz:
             raise ValueError("z_index is outside the MuMax+ vector field")
-        if self._last_time_s is not None and before_time < self._last_time_s:
-            raise ValueError("physical time must not decrease within a segment")
         meshgrid = np.asarray(self.magnet.meshgrid)
         if meshgrid.shape != (3, nz, ny, nx):
             raise ValueError("magnet.meshgrid must have shape (3, nz, ny, nx)")
@@ -136,7 +171,6 @@ class MuMaxPlusSampler:
         if len(cellsize) != 3 or cellsize[0] <= 0 or cellsize[1] <= 0:
             raise ValueError("world.cellsize must provide positive XY spacing")
         material_mask = self._geometry_mask((nz, ny, nx), z_index)
-        vectors = np.moveaxis(raw[:, z_index, :, :], 0, -1)
         coordinates = meshgrid[:, z_index, :, :]
         origin = tuple(float(coordinates[axis, 0, 0]) for axis in range(3))
         xx, yy = np.meshgrid(origin[0]+np.arange(nx)*cellsize[0], origin[1]+np.arange(ny)*cellsize[1])
@@ -146,18 +180,7 @@ class MuMaxPlusSampler:
         quantity_name = getattr(self.quantity, "name", None) or (
             "magnetization" if self.quantity is getattr(self.magnet, "magnetization", None) else "custom_vector_quantity"
         )
-        self.last_capture_ms = (time.perf_counter() - started) * 1000.0
-        provenance = json.dumps({
-            "backend": "mumaxplus", "version": probe_mumaxplus()["version"],
-            "entity_id": self.entity_id, "segment_id": self.segment_id,
-            "quantity": quantity_name, "quantity_semantics": self.quantity_semantics,
-            "raw_shape": list(raw.shape), "z_index": z_index,
-            "sim_time_s": before_time,
-            "transfer_and_geometry_ms": self.last_capture_ms,
-        }, sort_keys=True)
-        frame = FieldFrame(vectors, cellsize[0], cellsize[1], before_time, origin, material_mask,
-                           self.entity_id, "live", self.segment_id, sequence, self.time_kind, provenance)
-        self._last_sequence = sequence
-        self._last_time_s = before_time
-        self.last_capture_ms = (time.perf_counter() - started) * 1000.0
-        return frame
+        material_mask.setflags(write=False)
+        return dict(raw_shape=raw.shape, z_index=z_index, cellsize=cellsize, origin=origin,
+                    mask=material_mask, quantity_name=quantity_name,
+                    version=probe_mumaxplus()["version"])
