@@ -24,9 +24,28 @@ def _tiles(shape, divisions=4):
             yield f'{j}-{i}', np.ix_(rows, cols)
 
 
+def _tile_slices(shape, divisions=4):
+    """Contiguous views with the same unequal-size partition as array_split."""
+    axes = []
+    for size in shape:
+        count = min(divisions, size)
+        width, extra = divmod(size, count)
+        edges = [i * width + min(i, extra) for i in range(count + 1)]
+        axes.append([slice(a, b) for a, b in zip(edges, edges[1:])])
+    for j, rows in enumerate(axes[0]):
+        for i, cols in enumerate(axes[1]):
+            yield f'{j}-{i}', (rows, cols)
+
+
 def observe_field(frame, recipe='topology', *, method='solid_angle', boundary='open',
                   domain_axis=(1, 0, 0), reference_axis=(0, 1, 0), previous=None, max_dt_s=None,
-                  history=None, band_config=None):
+                  history=None, band_config=None, activity_contributions=True):
+    """Observe physics; compact activity callers may omit the per-site grid.
+
+    Disabling activity_contributions preserves fixed-tile observations and
+    diagnostics. The focused observer uses those tiles to build its own grid.
+    Other recipes and the default full-field adaptive path are unchanged.
+    """
     observations = []
     contributions = None
     validity_override = None
@@ -84,25 +103,30 @@ def observe_field(frame, recipe='topology', *, method='solid_angle', boundary='o
         from .observers.activity import angular_activity
         result = angular_activity(previous, frame, max_dt_s=max_dt_s)
         coverage = result.coverage
-        input_positive = result.mean_rad_s
+        mean_rate, max_rate = result.mean_rad_s, result.max_rad_s
+        input_positive = mean_rate
         validity_override = result.validity
         ny, nx = frame.vectors.shape[:2]
-        x, y = np.meshgrid(np.arange(nx)*frame.dx_m+frame.origin_m[0],
-                           np.arange(ny)*frame.dy_m+frame.origin_m[1])
+        x_axis = np.arange(nx)*frame.dx_m+frame.origin_m[0]
+        y_axis = np.arange(ny)*frame.dy_m+frame.origin_m[1]
         material_count = int(np.count_nonzero(frame.mask))
-        contributions = ContributionGrid(x, y, np.where(result.valid, result.rate_rad_s, 0)/max(1, material_count),
-            np.zeros_like(x), frame.origin_m[2], frame.entity_id, 'angular_activity_mean_contribution', 'rad/s')
-        for tile, index in _tiles(result.valid.shape):
+        if activity_contributions:
+            x, y = np.meshgrid(x_axis, y_axis)
+            contributions = ContributionGrid(x, y, np.where(result.valid, result.rate_rad_s, 0)/max(1, material_count),
+                np.zeros_like(x), frame.origin_m[2], frame.entity_id, 'angular_activity_mean_contribution', 'rad/s')
+        for tile, index in _tile_slices(result.valid.shape):
             weights = np.where(result.valid[index], result.rate_rad_s[index], 0.0)
             total = float(np.sum(weights))
             if total <= 0 or not np.isfinite(total):
                 continue
-            position = (float(np.sum(x[index]*weights)/total), float(np.sum(y[index]*weights)/total), frame.origin_m[2])
+            rows, cols = index
+            position = (float(np.sum(x_axis[cols]*np.sum(weights, axis=0))/total),
+                        float(np.sum(y_axis[rows]*np.sum(weights, axis=1))/total), frame.origin_m[2])
             observations.append(Observation(f'activity:{tile}', position, total/material_count, 1,
                 entity_id=frame.entity_id, quantity='angular_activity_mean_contribution', unit='rad/s'))
-        summary = f'活动均值 {result.mean_rad_s:.3g} rad/s · 峰值 {result.max_rad_s:.3g} rad/s'
-        diagnostic = dict(recipe=recipe, rate_unit='rad/s', mean_rad_s=result.mean_rad_s,
-            max_rad_s=result.max_rad_s, dt_s=result.dt_s, max_dt_s=max_dt_s,
+        summary = f'活动均值 {mean_rate:.3g} rad/s · 峰值 {max_rate:.3g} rad/s'
+        diagnostic = dict(recipe=recipe, rate_unit='rad/s', mean_rad_s=mean_rate,
+            max_rad_s=max_rate, dt_s=result.dt_s, max_dt_s=max_dt_s,
             coverage=coverage, validity=result.validity, reason=result.reason, warnings=list(result.warnings),
             sequence=frame.sequence, previous_sequence=previous.sequence if previous is not None else None,
             previous_sim_time_s=previous.sim_time_s if previous is not None else None,
@@ -182,7 +206,10 @@ def apply_aggregation(view, attention, budget=4, mode='fixed'):
     if view.sample.validity != 'valid' or view.sample.coverage != 1:
         info = dict(status=view.sample.validity, reason='physical observation is not fully valid')
     elif view.contributions is None:
-        info = dict(status='unsupported', reason='continuous direction requires circular aggregation; using fixed tiles')
+        reason = ('continuous direction requires circular aggregation; using fixed tiles'
+                  if view.diagnostic.get('recipe') == 'direction'
+                  else 'per-site contributions unavailable; using fixed tiles')
+        info = dict(status='unsupported', reason=reason)
     else:
         result = aggregate(view.contributions, attention, budget)
         info = result.diagnostic

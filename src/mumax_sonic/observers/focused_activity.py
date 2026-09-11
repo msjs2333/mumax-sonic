@@ -127,7 +127,7 @@ class FocusedActivity:
         else:
             local = observe_field(_crop(current, r0, r1, c0, c1), "activity",
                                   previous=_crop(previous, r0, r1, c0, c1) if previous is not None else None,
-                                  max_dt_s=max_dt_s)
+                                  max_dt_s=max_dt_s, activity_contributions=False)
             self._foreground_key, self._foreground_view = foreground_key, local
         focus_ms = (time.monotonic() - started) * 1000.0
         self._enqueue(previous, current, max_dt_s)
@@ -295,6 +295,7 @@ class FocusedActivity:
                            current.origin_m, np.zeros((3, 3), dtype=bool), current.entity_id,
                            current.source_kind, current.segment_id, current.sequence, current.time_kind,
                            current.provenance)
-        local = observe_field(empty, "activity", previous=None, max_dt_s=max_dt_s)
+        local = observe_field(empty, "activity", previous=None, max_dt_s=max_dt_s,
+                              activity_contributions=False)
         self._enqueue(previous, current, max_dt_s)
         return self._merged(current, local, (0, 0, 0, 0), 0.0)

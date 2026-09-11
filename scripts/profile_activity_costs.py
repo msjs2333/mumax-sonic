@@ -32,6 +32,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('manifest', type=Path)
     parser.add_argument('--baseline-kernel', type=Path)
+    parser.add_argument('--baseline-pipeline', type=Path,
+                        help='Optional earlier field_pipeline.py for same-kernel view comparison')
     parser.add_argument('--report', type=Path, required=True)
     parser.add_argument('--repeats', type=int, default=5)
     args = parser.parse_args()
@@ -59,7 +61,18 @@ def main():
         result, costs = measure(lambda: kernel(before, after), args.repeats)
         with patch.object(activity, 'angular_activity', kernel):
             view, view_cost = measure(lambda: observe_field(after, 'activity', previous=before), args.repeats)
+            compact, compact_cost = measure(lambda: observe_field(
+                after, 'activity', previous=before, activity_contributions=False), args.repeats)
+        assert view.sample == compact.sample
+        assert view.diagnostic == compact.diagnostic
+        assert compact.contributions is None
+        with patch.object(activity, 'angular_activity', return_value=result):
+            _, full_build = measure(lambda: observe_field(after, 'activity', previous=before), args.repeats)
+            _, compact_build = measure(lambda: observe_field(
+                after, 'activity', previous=before, activity_contributions=False), args.repeats)
         report[name] = dict(kernel=costs, full_view=view_cost, coverage=result.coverage,
+                            compact_view=compact_cost, full_build_only=full_build,
+                            compact_build_only=compact_build,
                             mean_rad_s=result.mean_rad_s, max_rad_s=result.max_rad_s)
         if reference is None:
             reference = result
@@ -77,6 +90,24 @@ def main():
             _, normalization = measure(lambda: (module._normalized(before.vectors, before.mask),
                                                module._normalized(after.vectors, after.mask)), args.repeats)
             report[name]['normalization_pair'] = normalization
+    if args.baseline_pipeline:
+        spec = importlib.util.spec_from_file_location('mumax_sonic._baseline_pipeline', args.baseline_pipeline)
+        baseline_pipeline = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = baseline_pipeline
+        spec.loader.exec_module(baseline_pipeline)
+        old, old_cost = measure(lambda: baseline_pipeline.observe_field(
+            after, 'activity', previous=before), args.repeats)
+        with patch.object(activity, 'angular_activity', return_value=result):
+            _, old_build = measure(lambda: baseline_pipeline.observe_field(
+                after, 'activity', previous=before), args.repeats)
+        assert old.sample.validity == compact.sample.validity
+        assert [o.source_id for o in old.sample.observations] == [o.source_id for o in compact.sample.observations]
+        np.testing.assert_allclose([o.strength for o in old.sample.observations],
+                                   [o.strength for o in compact.sample.observations], rtol=1e-12)
+        np.testing.assert_allclose([o.position_m for o in old.sample.observations],
+                                   [o.position_m for o in compact.sample.observations], rtol=1e-12, atol=1e-20)
+        report['baseline_pipeline'] = dict(full_view=old_cost, build_only=old_build,
+                                           compact_tiles_agree=True)
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, indent=2), encoding='utf-8')
     print(json.dumps(report, indent=2))
