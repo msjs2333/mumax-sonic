@@ -33,11 +33,33 @@ def main():
     parser.add_argument('--stale-s', type=float, default=2.0,
                         help='Explicit freshness budget; reported separately from latency')
     parser.add_argument('--report', type=Path, required=True)
+    parser.add_argument('--read-profile', type=Path,
+                        help='Optional nested read timings; diagnostic run only')
     args = parser.parse_args()
     if not math.isfinite(args.phase_s) or not 10 <= args.phase_s <= 600:
         parser.error('phase-s must be 10..600')
     if not math.isfinite(args.stale_s) or args.stale_s <= 0:
         parser.error('stale-s must be finite and positive')
+    if args.read_profile:
+        from dataclasses import asdict
+        from profile_read_costs import ProfileCollector, _summary
+        collector = ProfileCollector()
+        with collector.instrument():
+            run(args)
+        samples = collector.snapshot()
+        by_thread = {name: _summary([s for s in samples if s.thread == name])
+                     for name in sorted({s.thread for s in samples})}
+        args.read_profile.parent.mkdir(parents=True, exist_ok=True)
+        args.read_profile.write_text(json.dumps(dict(
+            by_thread=by_thread, samples=[asdict(s) for s in samples],
+            note='Nested wall-clock timings, not additive. Includes instrumentation overhead. '
+                 'mumax-sonic-live isolates follower reads; fieldframe_construct only instruments '
+                 'the OVF loader constructor, not ROI crops. No content hashing.'), indent=2), encoding='utf-8')
+    else:
+        run(args)
+
+
+def run(args):
     meta = json.loads(args.manifest.read_text(encoding='utf-8'))
     records = meta.pop('frames')
     base = args.manifest.resolve().parent

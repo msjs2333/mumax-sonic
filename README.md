@@ -12,6 +12,8 @@ P3d 已加入持续运行、真实成对开销基准与故障恢复测试。首�
 
 最新关注区优化省去了局部观察中最终丢弃的完整贡献网格，后处理中位从约 33.5 ms 降到 5.2 ms。CDW 180 秒复测仍全部观察到 127 帧、无 stale；但本次读取阶段明显变慢，发布到控制 p95 约 232–337 ms，端到端未改善，100 ms 目标仍未通过，见 [紧凑观察与复测](docs/p3d-compact-validation.md)。上一批结果见 [活动核优化](docs/p3d-activity-validation.md)及 [接入优化](docs/p3d-ingest-validation.md)。
 
+随后完成 [读取分段诊断](docs/p3d-read-breakdown.md)：新的 180 秒复测读取中位恢复到约 24–26 ms，控制 p95 约 145–253 ms，仍全部观察到 127 帧、无 stale。此前慢读未复现，原因尚未确认；本批增加可选诊断工具，未更改生产读取算法，不能将恢复计作算法提速。
+
 ```powershell
 python launch.py --backend-info
 python scripts/run_mumaxplus_live.py --frames 60
