@@ -45,7 +45,7 @@ def main():
         from profile_read_costs import ProfileCollector, _summary
         collector = ProfileCollector()
         with collector.instrument():
-            run(args)
+            run(args, parser)
         samples = collector.snapshot()
         by_thread = {name: _summary([s for s in samples if s.thread == name])
                      for name in sorted({s.thread for s in samples})}
@@ -56,10 +56,10 @@ def main():
                  'mumax-sonic-live isolates follower reads; fieldframe_construct only instruments '
                  'the OVF loader constructor, not ROI crops. No content hashing.'), indent=2), encoding='utf-8')
     else:
-        run(args)
+        run(args, parser)
 
 
-def run(args):
+def run(args, parser):
     meta = json.loads(args.manifest.read_text(encoding='utf-8'))
     records = meta.pop('frames')
     base = args.manifest.resolve().parent
