@@ -747,7 +747,11 @@ class SonicApp:
                 f"{o.position_m[0]*1e6:.2f}, {o.position_m[1]*1e6:.2f}", f"{o.strength:.3g}",
                 f"{gains.get(o.source_id, 0):.4f}", f"{math.degrees(o.orientation_rad):.1f}",
                 ('圈内' if draw_attention.contains(o) else '圈外') + (' / 已选入' if gains.get(o.source_id, 0) > 0 else ' / 已选但输出静音' if o.source_id in self.selection_report['selected_ids'] else ' / 未选入')))
-        self._tick_id = self.window.after(33, self._tick)
+        # Target a 33 ms start-to-start period rather than adding rendering
+        # time to every cycle. Do not queue catch-up ticks after an overrun;
+        # leave at least 5 ms for other Tk events and worker threads.
+        delay_ms = max(5, math.ceil(33 - (time.monotonic() - now) * 1000))
+        self._tick_id = self.window.after(delay_ms, self._tick)
 
     def export_diagnostics(self):
         filename = filedialog.asksaveasfilename(defaultextension=".json", initialfile="sonic-diagnostics.json", filetypes=[("JSON", "*.json")])

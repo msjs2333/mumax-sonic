@@ -17,6 +17,7 @@ from mumax_sonic.fields import FieldFrame
 
 _LARGE_STEP_RAD = pi / 2.0
 _DT_REL_TOLERANCE = 1.0e-9
+_ACTIVITY_BLOCK_VOXELS = 4096
 
 
 @dataclass(frozen=True)
@@ -100,7 +101,7 @@ def angular_activity(
     rate = np.full(shape, np.nan, dtype=float)
     valid = np.zeros(shape, dtype=bool)
     warnings: list[str] = []
-    excluded_samples, overflowed_rates, large_step = _angular_rates_by_row(
+    excluded_samples, overflowed_rates, large_step = _angular_rates_by_block(
         previous.vectors,
         current.vectors,
         current.mask,
@@ -150,7 +151,7 @@ def _same_geometry(previous: FieldFrame, current: FieldFrame) -> bool:
     )
 
 
-def _angular_rates_by_row(
+def _angular_rates_by_block(
     previous: np.ndarray,
     current: np.ndarray,
     material: np.ndarray,
@@ -158,73 +159,63 @@ def _angular_rates_by_row(
     rate: np.ndarray,
     valid: np.ndarray,
 ) -> tuple[bool, bool, bool]:
-    """Fill activity outputs one row at a time without normalizing full fields.
+    """Fill activity outputs in bounded voxel blocks without full-field normalization.
 
     Scaling each finite vector by its largest absolute component makes all
     intermediate products bounded.  The omitted vector-norm product is the
     same positive factor in both the cross magnitude and dot product, so it
     cancels exactly in ``atan2``.
+
+    Rectangular blocks keep temporary arrays bounded for large fields and do
+    not require flattening an input, which could copy a Fortran-layout frame.
     """
 
     excluded_samples = False
     overflowed_rates = False
     large_step = False
-    for row_index in range(material.shape[0]):
-        prior_row = previous[row_index]
-        current_row = current[row_index]
-        material_row = material[row_index]
+    rows, columns = material.shape
+    block_columns = min(columns, _ACTIVITY_BLOCK_VOXELS)
+    block_rows = max(1, _ACTIVITY_BLOCK_VOXELS // block_columns)
+    for row0 in range(0, rows, block_rows):
+        row1 = min(rows, row0 + block_rows)
+        for col0 in range(0, columns, block_columns):
+            col1 = min(columns, col0 + block_columns)
+            prior_block = previous[row0:row1, col0:col1]
+            current_block = current[row0:row1, col0:col1]
+            material_block = material[row0:row1, col0:col1]
+            prior_x, prior_y, prior_z = prior_block[..., 0], prior_block[..., 1], prior_block[..., 2]
+            current_x, current_y, current_z = current_block[..., 0], current_block[..., 1], current_block[..., 2]
+            prior_finite = np.isfinite(prior_x) & np.isfinite(prior_y) & np.isfinite(prior_z)
+            current_finite = np.isfinite(current_x) & np.isfinite(current_y) & np.isfinite(current_z)
+            prior_scale = np.maximum(np.abs(prior_x), np.maximum(np.abs(prior_y), np.abs(prior_z)))
+            current_scale = np.maximum(np.abs(current_x), np.maximum(np.abs(current_y), np.abs(current_z)))
+            usable = material_block & prior_finite & current_finite & (prior_scale > 0.0) & (current_scale > 0.0)
+            if np.any(material_block & ~usable):
+                excluded_samples = True
+            if not np.any(usable):
+                continue
 
-        prior_finite = np.all(np.isfinite(prior_row), axis=-1)
-        current_finite = np.all(np.isfinite(current_row), axis=-1)
-        prior_scale = np.max(np.abs(prior_row), axis=-1)
-        current_scale = np.max(np.abs(current_row), axis=-1)
-        usable = (
-            material_row
-            & prior_finite
-            & current_finite
-            & (prior_scale > 0.0)
-            & (current_scale > 0.0)
-        )
-        if np.any(material_row & ~usable):
-            excluded_samples = True
-        if not np.any(usable):
-            continue
-
-        prior_scaled = np.zeros_like(prior_row, dtype=float)
-        current_scaled = np.zeros_like(current_row, dtype=float)
-        np.divide(
-            prior_row,
-            prior_scale[:, None],
-            out=prior_scaled,
-            where=prior_finite[:, None] & (prior_scale[:, None] > 0.0),
-        )
-        np.divide(
-            current_row,
-            current_scale[:, None],
-            out=current_scaled,
-            where=current_finite[:, None] & (current_scale[:, None] > 0.0),
-        )
-
-        dot = (
-            prior_scaled[:, 0] * current_scaled[:, 0]
-            + prior_scaled[:, 1] * current_scaled[:, 1]
-            + prior_scaled[:, 2] * current_scaled[:, 2]
-        )
-        cross_x = prior_scaled[:, 1] * current_scaled[:, 2] - prior_scaled[:, 2] * current_scaled[:, 1]
-        cross_y = prior_scaled[:, 2] * current_scaled[:, 0] - prior_scaled[:, 0] * current_scaled[:, 2]
-        cross_z = prior_scaled[:, 0] * current_scaled[:, 1] - prior_scaled[:, 1] * current_scaled[:, 0]
-        cross_norm = np.sqrt(cross_x * cross_x + cross_y * cross_y + cross_z * cross_z)
-        angle = np.arctan2(cross_norm, dot)
-        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
-            local_rate = angle / dt_s
-        finite_rate = np.isfinite(local_rate)
-        row_valid = usable & finite_rate
-        np.copyto(rate[row_index], local_rate, where=row_valid)
-        valid[row_index] = row_valid
-        if np.any(usable & ~finite_rate):
-            overflowed_rates = True
-        if np.any(row_valid & (angle >= _LARGE_STEP_RAD)):
-            large_step = True
+            prior_x = np.divide(prior_x, prior_scale, out=np.zeros_like(prior_x), where=usable)
+            prior_y = np.divide(prior_y, prior_scale, out=np.zeros_like(prior_y), where=usable)
+            prior_z = np.divide(prior_z, prior_scale, out=np.zeros_like(prior_z), where=usable)
+            current_x = np.divide(current_x, current_scale, out=np.zeros_like(current_x), where=usable)
+            current_y = np.divide(current_y, current_scale, out=np.zeros_like(current_y), where=usable)
+            current_z = np.divide(current_z, current_scale, out=np.zeros_like(current_z), where=usable)
+            dot = prior_x * current_x + prior_y * current_y + prior_z * current_z
+            cross_x = prior_y * current_z - prior_z * current_y
+            cross_y = prior_z * current_x - prior_x * current_z
+            cross_z = prior_x * current_y - prior_y * current_x
+            angle = np.arctan2(np.sqrt(cross_x * cross_x + cross_y * cross_y + cross_z * cross_z), dot)
+            with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+                local_rate = angle / dt_s
+            finite_rate = np.isfinite(local_rate)
+            block_valid = usable & finite_rate
+            np.copyto(rate[row0:row1, col0:col1], local_rate, where=block_valid)
+            valid[row0:row1, col0:col1] = block_valid
+            if np.any(usable & ~finite_rate):
+                overflowed_rates = True
+            if np.any(block_valid & (angle >= _LARGE_STEP_RAD)):
+                large_step = True
     return excluded_samples, overflowed_rates, large_step
 
 

@@ -54,6 +54,25 @@ def test_no_audio_start_is_explicit(app):
     assert app.engine is None
 
 
+@pytest.mark.parametrize('render_ms', [10, 25, 80])
+def test_control_cycle_accounts_for_render_time_without_catchup(app, monkeypatch, render_ms):
+    import mumax_sonic.ui.app as module
+    clock = [100.0]
+    app._last_tick = clock[0]
+    monkeypatch.setattr(module.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(app, '_draw', lambda attention: clock.__setitem__(0, clock[0] + render_ms/1000))
+    scheduled = []
+    monkeypatch.setattr(app.window, 'after', lambda delay, callback: scheduled.append((delay, callback)))
+    app._tick()
+    assert len(scheduled) == 1
+    delay, callback = scheduled[0]
+    assert callback == app._tick
+    if render_ms < 28:
+        assert 33 <= render_ms + delay <= 34
+    else:
+        assert delay == 5  # no zero-delay backlog after a slow frame
+
+
 def test_focused_live_view_is_audible_in_first_tick_and_stale_still_mutes(app):
     from mumax_sonic.observers.focused_activity import FocusedActivity
     from mumax_sonic.sources.activity_demo import make_activity_frame

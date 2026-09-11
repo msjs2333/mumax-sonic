@@ -14,6 +14,8 @@ P3d 已加入持续运行、真实成对开销基准与故障恢复测试。首�
 
 随后完成 [读取分段诊断](docs/p3d-read-breakdown.md)：新的 180 秒复测读取中位恢复到约 24–26 ms，控制 p95 约 145–253 ms，仍全部观察到 127 帧、无 stale。此前慢读未复现，原因尚未确认；本批增加可选诊断工具，未更改生产读取算法，不能将恢复计作算法提速。
 
+最新 [有界活动分块与控制周期](docs/p3d-block-schedule-validation.md) 将真实大关注区核中位从约 59.6 ms 降到 22.5 ms，补偿 UI 绘制占用的控制周期；288 项回归通过。180 秒运行再次出现读取及控制长尾，开启分段计时的 80 秒补测 p95 为 103–134 ms。两轮均无 stale，但尚未证明稳定达到 100 ms，下一步需交替对照计时开关与调度影响。
+
 ```powershell
 python launch.py --backend-info
 python scripts/run_mumaxplus_live.py --frames 60

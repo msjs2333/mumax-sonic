@@ -152,3 +152,24 @@ def test_tiling_at_arbitrary_boundaries_matches_whole_field():
             stitched_valid[row0:row1, col0:col1] = pair.valid
     np.testing.assert_array_equal(stitched_valid, whole.valid)
     np.testing.assert_allclose(stitched, whole.rate_rad_s, rtol=0.0, atol=0.0, equal_nan=True)
+
+
+@pytest.mark.parametrize('order', ['C', 'F'])
+@pytest.mark.parametrize('shape', [(131, 137), (3, 4103)])
+def test_large_irregular_field_matches_analytic_angles_across_processing_blocks(order, shape):
+    angles = np.linspace(1e-8, math.pi - 1e-8, np.prod(shape)).reshape(shape)
+    amplitude = np.logspace(-280, 280, np.prod(shape)).reshape(shape)
+    previous = np.zeros((*shape, 3), order=order)
+    current = np.zeros_like(previous, order=order)
+    previous[..., 0] = amplitude
+    current[..., 0] = np.cos(angles) * amplitude
+    current[..., 1] = np.sin(angles) * amplitude
+    mask = np.ones(shape, dtype=bool)
+    mask[::7, ::11] = False
+    result = angular_activity(_frame(previous, mask=mask),
+                              _frame(current, time=.125, sequence=1, mask=mask))
+    assert result.validity == 'valid'
+    np.testing.assert_array_equal(result.valid, mask)
+    np.testing.assert_allclose(result.rate_rad_s[mask], angles[mask]/.125,
+                               rtol=1e-12, atol=1e-14)
+    assert np.isnan(result.rate_rad_s[~mask]).all()
