@@ -1,0 +1,24 @@
+// Public SP4 Field 1 ingestion case; see README.md for scope and sources.
+// Relaxed initialization follows the official MuMax3 example.
+SetGridSize(128, 32, 1)
+SetCellSize(500e-9/128, 125e-9/32, 3e-9)
+Msat = 800e3
+Aex = 13e-12
+alpha = 0.02
+
+m = uniform(1, 0.1, 0)
+relax()
+SaveAs(m, "relaxed")
+
+// The bridge excludes the named relaxation snapshot.
+t = 0
+B_ext = vector(-24.6e-3, 4.3e-3, 0)
+sampleInterval := 10e-12
+sampleCount := 100
+Save(m)
+TableSave()
+for sampleIndex := 0; sampleIndex < sampleCount; sampleIndex++ {
+    Run(sampleInterval)
+    Save(m)
+    TableSave()
+}

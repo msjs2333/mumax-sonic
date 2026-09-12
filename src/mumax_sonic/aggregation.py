@@ -154,6 +154,12 @@ def _observation(node: _Node, sign: int, source_id: str, grid: ContributionGrid,
     total = float(node.masses.sum())
     cx, cy = _centroid(node, x, y)
     effective = sqrt(float(np.dot(node.masses, point_weight[node.sites] ** 2) / total))
+    # ``point_weight`` is constructed by _roi_components in the closed [0, 1]
+    # interval, so its weighted RMS is also in that interval mathematically.
+    # A near-one dot-product reduction can nevertheless round one ulp above
+    # the closed Observation contract.  Do not hide a material violation.
+    if 1.0 < effective <= 1.0 + 8.0 * np.finfo(float).eps:
+        effective = 1.0
     return Observation(
         source_id, (cx, cy, grid.z_m), total, sign,
         entity_id=grid.entity_id, quantity=grid.quantity, unit=grid.unit,
