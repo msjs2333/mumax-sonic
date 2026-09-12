@@ -2,7 +2,7 @@
 
 面向微磁与相关磁性连续场仿真的空间可听化工具：用可解释的声音辅助感知状态、运动、频带活动与拓扑结构，并通过可调关注区域分配听觉注意力。
 
-**当前状态：P4a 公开案例验证已完成。** 标准问题 4 的 Field 1 已完成真实小网格运行、101 帧回放与观察器一致性检查，见 [P4a 记录](docs/p4a-validation.md)和[复现与试听入口](examples/standard_problem4/README.md)。下一主线为 P4b 双子晶格语义。P3d 保持暂时完成；100 ms 延迟及长期设备验收尚未全部通过，读取方式、传输及较大调度改造仍在待启动的 [P3e](docs/p3e-performance-plan.md)。
+**当前状态：P4b 双子晶格语义已完成。** 已实现显式 A/B 配对、等权 Néel 场与有量纲净磁化，并用真实 MuMax+ 小型 AFM 的 41 帧完成采样、回放与活动检查，见 [P4b 记录](docs/p4b-validation.md)和[复现与试听入口](examples/antiferromagnet/README.md)。下一主线为 P4c 真实频带案例。此前公开标准问题验证见 [P4a](docs/p4a-validation.md)。P3d 保持暂时完成；100 ms 延迟及长期设备验收尚未全部通过，较大性能改造仍在待启动的 [P3e](docs/p3e-performance-plan.md)。
 
 支持 MuMax3 完整 OVF 输出桥接、增量读取和 MuMax+ 直接采样；已验证两个真实小网格后端，见 [接入验证](docs/p3bc-validation.md)。P3d 的持续运行、成对开销及故障恢复证据见 [首批验证](docs/p3d-validation.md)。下列记录保留各轮结果，不代表全部性能目标通过。
 
