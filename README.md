@@ -2,7 +2,7 @@
 
 面向微磁与相关磁性连续场仿真的空间可听化工具：用可解释的声音辅助感知状态、运动、频带活动与拓扑结构，并通过可调关注区域分配听觉注意力。
 
-**当前状态：P4c 真实频带案例已完成。** 三组真实 MuMax3 进动输出验证了带内、带外及反相局域强度，见 [P4c 记录](docs/p4c-validation.md)和[复现与试听入口](examples/frequency_band/README.md)。下一步建议 P4 收尾试听，再据听觉结果调整音色和入口。已有 [P4a 公开案例](docs/p4a-validation.md)与 [P4b 双子晶格](docs/p4b-validation.md)验证继续保留；P4 尚未完成全部设备和泛化验收。P3d 保持暂时完成，100 ms 延迟及长期设备目标尚未全部通过，较大性能改造仍在待启动的 [P3e](docs/p3e-performance-plan.md)。
+**当前状态：P4 工程收尾完成，等待手动试听反馈。** 已准备 FM/AFM/频带与合成拓扑的 8 段对照入口，原生设备短测通过，见 [收尾记录](docs/p4-closeout.md)、[试听入口](examples/p4_listening/README.md)和[意见表模板](docs/p4-listening-feedback-template.md)。P4a–c 的数值验证不等同于人耳可辨或全部泛化能力验收。反馈后可局部调整音色，下一开发主线为 P5a 姿态模拟输入。P3d 保持暂时完成，100 ms 延迟及长期设备目标尚未全部通过，较大性能改造仍在待启动的 [P3e](docs/p3e-performance-plan.md)。
 
 支持 MuMax3 完整 OVF 输出桥接、增量读取和 MuMax+ 直接采样；已验证两个真实小网格后端，见 [接入验证](docs/p3bc-validation.md)。P3d 的持续运行、成对开销及故障恢复证据见 [首批验证](docs/p3d-validation.md)。下列记录保留各轮结果，不代表全部性能目标通过。
 
