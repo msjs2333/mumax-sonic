@@ -86,6 +86,8 @@ class AttachedSimulation:
     def _start_sequence(self):
         keep = self.config.band_config.window_samples if (
             self.config.recipe == 'band' and self.config.band_config is not None) else 2
+        if self._options['time_kind'] != 'dynamics':
+            keep = 1  # static/relaxation snapshots have no physical dt history
         # Only filenames are inspected here; no historical frame decode or hash.
         sequences = (int(match.group(1)) for path in self.directory.glob(self._options['pattern'])
                      if (match := re.search(r'(\d+)$', path.stem)))
