@@ -98,6 +98,7 @@ class SonicApp:
         self.live_stale_s = 2.0
         self.live_snapshot = None
         self._live_settings = None
+        self.attachment_dialog = None
         self.selection_note = tk.StringVar()
         self._labels = {v: k for k, v in SCENARIOS.items()}
         self._labels.update({v: k for k, v in FIELD_SCENARIOS.items()})
@@ -243,6 +244,7 @@ class SonicApp:
         ttk.Button(audio_row, text="静音", command=self.mute).pack(side="left", padx=6)
         ttk.Button(audio_row, text="刷新设备", command=self.refresh_devices).pack(side="left")
         ttk.Button(audio_row, text="加载场", command=self.load_field).pack(side="left", padx=4)
+        ttk.Button(audio_row, text="接入仿真", command=self.open_attachment).pack(side="left", padx=4)
         ttk.Button(audio_row, text="导出诊断", command=self.export_diagnostics).pack(side="right")
         ttk.Label(shell, textvariable=self.status, style="Muted.TLabel", wraplength=1040).pack(anchor="w")
 
@@ -346,7 +348,8 @@ class SonicApp:
             self.seek_to(max(0, index+delta)*STEP_S)
 
     def apply_band(self):
-        if self._external_live_source is not None and self._labels[self.scenario.get()] == 'live':
+        from ..sources.attachment import AttachedSimulation
+        if self._external_live_source is not None and not isinstance(self._external_live_source, AttachedSimulation) and self._labels[self.scenario.get()] == 'live':
             self.status.set('直接采样的频带参数由生产端 LiveConfig 定义')
             config = self._external_live_source.config.band_config or self.band_config
             self.band_low.set(f'{config.low_hz/1e9:g}')
@@ -364,7 +367,8 @@ class SonicApp:
             self.status.set(f'频带设置失败：{exc}')
 
     def apply_max_dt(self):
-        if self._external_live_source is not None and self._labels[self.scenario.get()] == 'live':
+        from ..sources.attachment import AttachedSimulation
+        if self._external_live_source is not None and not isinstance(self._external_live_source, AttachedSimulation) and self._labels[self.scenario.get()] == 'live':
             value = self._external_live_source.config.max_dt_s
             self.max_dt_ns.set('' if value is None else f'{value*1e9:g}')
             self.status.set('直接采样的间隔约束由生产端 LiveConfig 定义')
@@ -444,7 +448,22 @@ class SonicApp:
             self._field_key = key
         return self._field_cache
 
+    def open_attachment(self, roots=(), directory=None, **options):
+        from .attach import AttachmentDialog
+        from ..sources.attachment import AttachedSimulation
+        if self.attachment_dialog is not None and not self.attachment_dialog.closed:
+            self.attachment_dialog.window.lift()
+            return
+        if isinstance(self._external_live_source, AttachedSimulation) and directory is None:
+            source = self._external_live_source
+            directory = source.directory
+            roots = roots or (source.directory.parent,)
+            options = {**source.options, **options}
+        self.attachment_dialog = AttachmentDialog(self, roots, directory, **options)
+
     def follow_live(self, path, stale_after_s=2.0):
+        if self.live_follower is not None:
+            self.live_follower.close()
         self._external_live_source = None
         self.live_path = Path(path)
         self.live_stale_s = stale_after_s
@@ -471,6 +490,16 @@ class SonicApp:
     def _poll_live(self):
         if self._external_live_source is not None:
             source = self._external_live_source
+            from ..sources.attachment import AttachedSimulation
+            if isinstance(source, AttachedSimulation):
+                from dataclasses import replace
+                recipe = {'活动': 'activity', '频带': 'band'}.get(self.replay_recipe.get(), 'topology')
+                config = replace(source.config, recipe=recipe, max_dt_s=self.max_dt_s,
+                                 band_config=self.band_config)
+                if config != source.config:
+                    self.mute()
+                    source = source.with_config(config).start()
+                    self.attach_live_source(source)
             self._push_live_attention(source)
             self.replay_recipe.set({'activity': '活动', 'band': '频带'}.get(source.config.recipe, '拓扑'))
             self.live_snapshot = source.snapshot()
@@ -772,6 +801,8 @@ class SonicApp:
 
     def close(self):
         self.closing = True
+        if self.attachment_dialog is not None and not self.attachment_dialog.closed:
+            self.attachment_dialog.close()
         self._aggregation_worker.close()
         if self.live_follower is not None:
             self.live_follower.close()
@@ -782,7 +813,7 @@ class SonicApp:
         self.window.destroy()
 
 
-def run(no_audio=False, dll_path=None, field_demo=None, replay_path=None, recipe='topology', max_dt_s=None, activity_reference=1e9, band_config=None, band_reference=0.005, source_budget=4, aggregation='fixed', follow_path=None, live_stale_s=2.0, live_source=None, focus_compute=False):
+def run(no_audio=False, dll_path=None, field_demo=None, replay_path=None, recipe='topology', max_dt_s=None, activity_reference=1e9, band_config=None, band_reference=0.005, source_budget=4, aggregation='fixed', follow_path=None, live_stale_s=2.0, live_source=None, focus_compute=False, attach=False, search_roots=(), attach_directory=None, attach_options=None):
     configure_dpi()
     root = tk.Tk()
     app = SonicApp(root, no_audio=no_audio, dll_path=dll_path)
@@ -797,6 +828,7 @@ def run(no_audio=False, dll_path=None, field_demo=None, replay_path=None, recipe
     app.source_budget.set(source_budget)
     app.aggregation_mode.set(aggregation)
     app.focus_compute.set(focus_compute)
+    app.live_stale_s = live_stale_s
     app.max_dt_s = max_dt_s
     app.max_dt_ns.set('' if max_dt_s is None else f'{max_dt_s*1e9:g}')
     app.activity_reference = activity_reference
@@ -814,6 +846,15 @@ def run(no_audio=False, dll_path=None, field_demo=None, replay_path=None, recipe
         app.follow_live(follow_path, live_stale_s)
     if live_source is not None:
         app.attach_live_source(live_source)
+    if attach:
+        if attach_directory is not None and ((attach_options or {}).get('all_material') or (attach_options or {}).get('mask_path')):
+            from ..sources.attachment import AttachedSimulation
+            from ..sources.live import LiveConfig
+            source = AttachedSimulation(attach_directory, LiveConfig(recipe=recipe, max_dt_s=max_dt_s,
+                band_config=app.band_config, stale_after_s=live_stale_s), **(attach_options or {})).start()
+            app.attach_live_source(source)
+        else:
+            app.open_attachment(search_roots, attach_directory, **(attach_options or {}))
     root.mainloop()
 
 

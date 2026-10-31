@@ -50,7 +50,10 @@ def _mask_info(path: Path):
 
 
 class MuMax3Bridge:
-    """Follow one numeric OVF series and publish a growing manifest.
+    """Follow a numeric OVF series; publish dynamics or the latest snapshot.
+
+    Static/relaxation snapshots each start a one-frame observation segment.
+    Their real timestamps may repeat or decrease and are never synthesized.
 
     A bridge has one writer lock for its lifetime.  It never modifies source
     OVF files or an already-existing manifest.
@@ -58,7 +61,7 @@ class MuMax3Bridge:
 
     def __init__(self, directory, manifest_path, *, entity_id, segment_id,
                  time_kind="dynamics", origin="simulation", all_material=False,
-                 mask_path=None, z_index=None, pattern="m[0-9]*.ovf"):
+                 mask_path=None, z_index=None, pattern="m[0-9]*.ovf", start_sequence=0):
         self.directory = Path(directory).resolve()
         self.manifest_path = Path(manifest_path).resolve()
         if self.manifest_path.is_relative_to(self.directory):
@@ -78,6 +81,9 @@ class MuMax3Bridge:
         self.entity_id, self.segment_id = entity_id, segment_id
         self.time_kind, self.origin = time_kind, origin
         self.z_index, self.pattern = z_index, pattern
+        if type(start_sequence) is not int or start_sequence < 0:
+            raise ValueError("start_sequence must be a nonnegative integer")
+        self.start_sequence = start_sequence
         self._mask, self._mask_shape = ("all", None) if all_material else _mask_info(Path(mask_path).resolve())
         self._manifest_created = False
         self._seen: dict[Path, tuple[int, int, Any]] = {}
@@ -129,7 +135,8 @@ class MuMax3Bridge:
             match = _SEQUENCE.fullmatch(path.stem)
             if not match:
                 raise ValueError("every matched OVF filename must end in a numeric sequence")
-            indexed.append((int(match.group(2)), path))
+            if int(match.group(2)) >= self.start_sequence:
+                indexed.append((int(match.group(2)), path))
         if len({n for n, _ in indexed}) != len(indexed):
             raise ValueError("duplicate numeric OVF sequence")
         return sorted(indexed)
@@ -181,12 +188,14 @@ class MuMax3Bridge:
             frames.append({"file": str(path), "sequence": sequence,
                            "time_s": field.time_s})
         gaps = [[a[0] + 1, b[0] - 1] for a, b in zip(records, records[1:]) if b[0] > a[0] + 1]
-        return {"schema_version": 1, "integrity": "unchecked", "entity_id": self.entity_id, "segment_id": self.segment_id,
+        segment = (self.segment_id if self.time_kind == "dynamics" else
+                   f"{self.segment_id}:snapshot:{records[-1][0]}")
+        return {"schema_version": 1, "integrity": "unchecked", "entity_id": self.entity_id, "segment_id": segment,
                 "time_kind": self.time_kind, "origin": self.origin,
                 "quantity": "magnetization_direction", "value_unit": "A/m" if records and records[0][2].units[0] == "A/m" else "1",
                 "components": ["x", "y", "z"], "z_index": self.z_index, "mask": self._mask,
                 "frames": frames, "sequence_source": "numeric filename suffix",
-                "selection": {"matched": len(records), "imported": len(records), "all_matches_selected": True,
+                "selection": {"matched": len(records), "imported": len(records), "all_matches_selected": self.time_kind == "dynamics",
                               "gaps_within_selected": gaps}}
 
     def _publish(self, meta):
@@ -224,6 +233,9 @@ class MuMax3Bridge:
             return {"state": "invalid", "reason": "bridge is closed", "published_frames": self._published_count, "pending_files": []}
         try:
             indexed = self._files()
+            snapshot_mode = self.time_kind != "dynamics"
+            if snapshot_mode:
+                indexed = indexed[-1:]
             if len(indexed) > MAX_FRAMES:
                 raise ValueError("OVF series exceeds 4096 frames")
             # Observe all stat signatures in parallel logical passes, so an
@@ -257,11 +269,16 @@ class MuMax3Bridge:
                 records.append((sequence, path, field))
             if not records:
                 return {"state": "waiting", "reason": "awaiting complete OVF files", "published_frames": self._published_count, "pending_files": pending}
-            if len(records) > self._published_count:
+            changed = (records[-1][1] not in self._published if snapshot_mode else
+                       len(records) > self._published_count)
+            if changed:
                 if self._publish(self._manifest(records)) is False:
                     return {"state": "waiting", "reason": "manifest replace is temporarily busy", "published_frames": self._published_count, "pending_files": []}
-                self._published_count = len(records)
+                self._published_count = self._published_count + 1 if snapshot_mode else len(records)
                 self._published = {p: True for _, p, _ in records}
+                if snapshot_mode:
+                    self._seen = {p: self._seen[p] for p in self._published}
+                    self._stable = {p: self._stable[p] for p in self._published}
             return {"state": "waiting" if pending else "current", "reason": "awaiting next complete frame" if pending else None, "published_frames": self._published_count, "pending_files": pending}
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             return {"state": "invalid", "reason": str(exc), "published_frames": self._published_count, "pending_files": []}

@@ -31,10 +31,33 @@ def main():
     parser.add_argument('--source-budget', type=int, default=4, choices=range(1, MAX_SOURCE_BUDGET+1), help='Maximum spatial voices; default 4, gain headroom uses 1/budget')
     parser.add_argument('--aggregation', choices=['fixed', 'adaptive'], default='fixed', help='Spatial contribution grouping')
     parser.add_argument('--follow', type=Path, help='Follow atomically published OVF JSON snapshots in the GUI')
+    parser.add_argument('--attach', nargs='?', const='', metavar='OUTPUT_DIR', help='Discover running simulations or attach to an output directory in one window')
+    parser.add_argument('--discover', action='store_true', help='List MuMax3 processes and output candidates as JSON, without audio')
+    parser.add_argument('--search-root', action='append', type=Path, default=[], help='Discover this directory and immediate .out children; repeatable')
+    material = parser.add_mutually_exclusive_group()
+    material.add_argument('--all-material', action='store_true', help='Confirm every mesh cell is material for attachment')
+    material.add_argument('--mask', type=Path, help='Boolean NPY material mask for attachment')
+    parser.add_argument('--z-index', type=int, help='Explicit layer for multilayer attachment')
+    parser.add_argument('--time-kind', choices=['dynamics', 'static', 'relaxation'], default='dynamics')
+    parser.add_argument('--pattern', default='m[0-9]*.ovf', help='Numeric OVF filename pattern for attachment')
     parser.add_argument('--focus-compute', action='store_true', help='Prioritize attention-region activity; refresh background separately')
     parser.add_argument('--live-stale-s', type=float, default=2.0, help='Mute live data after this wall-clock age without a new physical frame')
     parser.add_argument('--backend-info', action='store_true', help='Probe MuMax3 executable and MuMax+ import capabilities without running a solver')
     args = parser.parse_args()
+    if (args.attach is not None or args.discover) and (args.follow or args.replay or args.inspect_field or args.field_demo or args.doctor or args.audio_smoke is not None or args.backend_info):
+        parser.error('--attach/--discover cannot be combined with other source or diagnostic modes')
+    if args.attach is not None and args.discover:
+        parser.error('choose --attach or --discover')
+    if args.z_index is not None and args.z_index < 0:
+        parser.error('--z-index must be nonnegative')
+    if '/' in args.pattern or '\\' in args.pattern or '**' in args.pattern:
+        parser.error('--pattern must select files directly in the output directory')
+    if args.discover:
+        from .sources.discovery import discover_simulations
+        result = discover_simulations(args.search_root)
+        print(report_json(dict(candidates=[dict(directory=str(c.directory), pids=c.pids,
+            evidence=c.evidence, has_frames=c.has_frames) for c in result.candidates], warnings=result.warnings)))
+        return
     if args.backend_info:
         import shutil
         from .sources.mumaxplus import probe_mumaxplus
@@ -162,7 +185,9 @@ def main():
     else:
         from .ui.app import run
         run(no_audio=args.no_audio, dll_path=args.dll, field_demo=args.field_demo, replay_path=args.replay,
-            recipe=args.recipe, max_dt_s=max_dt_s, activity_reference=args.activity_reference_rad_s, band_config=band_config, band_reference=args.band_reference, source_budget=args.source_budget, aggregation=args.aggregation, follow_path=args.follow, live_stale_s=args.live_stale_s, focus_compute=args.focus_compute)
+            recipe=args.recipe, max_dt_s=max_dt_s, activity_reference=args.activity_reference_rad_s, band_config=band_config, band_reference=args.band_reference, source_budget=args.source_budget, aggregation=args.aggregation, follow_path=args.follow, live_stale_s=args.live_stale_s, focus_compute=args.focus_compute,
+            attach=args.attach is not None, search_roots=args.search_root, attach_directory=Path(args.attach) if args.attach else None,
+            attach_options=dict(all_material=args.all_material, mask_path=args.mask, z_index=args.z_index, time_kind=args.time_kind, pattern=args.pattern))
 
 
 if __name__ == "__main__":
