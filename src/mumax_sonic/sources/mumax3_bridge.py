@@ -58,7 +58,7 @@ class MuMax3Bridge:
 
     def __init__(self, directory, manifest_path, *, entity_id, segment_id,
                  time_kind="dynamics", origin="simulation", all_material=False,
-                 mask_path=None, z_index=None, pattern="m[0-9]*.ovf"):
+                 mask_path=None, z_index=None, pattern="m[0-9]*.ovf", start_sequence=0):
         self.directory = Path(directory).resolve()
         self.manifest_path = Path(manifest_path).resolve()
         if self.manifest_path.is_relative_to(self.directory):
@@ -78,6 +78,9 @@ class MuMax3Bridge:
         self.entity_id, self.segment_id = entity_id, segment_id
         self.time_kind, self.origin = time_kind, origin
         self.z_index, self.pattern = z_index, pattern
+        if type(start_sequence) is not int or start_sequence < 0:
+            raise ValueError("start_sequence must be a nonnegative integer")
+        self.start_sequence = start_sequence
         self._mask, self._mask_shape = ("all", None) if all_material else _mask_info(Path(mask_path).resolve())
         self._manifest_created = False
         self._seen: dict[Path, tuple[int, int, Any]] = {}
@@ -129,7 +132,8 @@ class MuMax3Bridge:
             match = _SEQUENCE.fullmatch(path.stem)
             if not match:
                 raise ValueError("every matched OVF filename must end in a numeric sequence")
-            indexed.append((int(match.group(2)), path))
+            if int(match.group(2)) >= self.start_sequence:
+                indexed.append((int(match.group(2)), path))
         if len({n for n, _ in indexed}) != len(indexed):
             raise ValueError("duplicate numeric OVF sequence")
         return sorted(indexed)
